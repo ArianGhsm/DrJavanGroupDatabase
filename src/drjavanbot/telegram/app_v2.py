@@ -18,8 +18,29 @@ _UPDATE_CALLBACKS = {
 class TelegramBotApp(CoreTelegramBotApp):
     """Owner updater/diagnostics UI layered over the stable Telegram handler."""
 
+    def _owner_home_keyboard(self) -> dict:
+        return inline_keyboard([
+            [("⚙️ پنل مالک", "settings"), ("🔄 Software Update", "software_update")],
+            [("🧯 خطاهای اخیر", "recent_errors")],
+        ])
+
     def _handle_command(self, chat_id: int, user_id: int, is_private: bool, text: str) -> None:
         command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
+        if command == "/start" and user_id == self.owner_id and is_private:
+            self.api.send_message(
+                chat_id,
+                "🦷 <b>DrJavanBot</b>\nسؤال را بفرستید؛ پاسخ فقط بر پایه آرشیو گروه تولید می‌شود.\n\nمالک شناسایی شد؛ پنل مدیریت از دکمه زیر در دسترس است.",
+                reply_markup=self._owner_home_keyboard(),
+            )
+            return
+        if command in {"/panel", "/settings"}:
+            if not self._require_owner_private(chat_id, user_id, is_private):
+                return
+            self._show_settings(chat_id)
+            return
+        if command == "/help" and user_id == self.owner_id and is_private:
+            self.api.send_message(chat_id, self._help_text(user_id), reply_markup=self._owner_home_keyboard())
+            return
         if command == "/update":
             if not self._require_owner_private(chat_id, user_id, is_private):
                 return
@@ -183,6 +204,8 @@ class TelegramBotApp(CoreTelegramBotApp):
     def _help_text(self, user_id: int) -> str:
         text = super()._help_text(user_id)
         if user_id == self.owner_id:
+            if "/panel" not in text:
+                text += "\n/panel — پنل مالک"
             if "/update" not in text:
                 text += "\n/update — آپدیت امن نرم‌افزار"
             if "/errors" not in text:
