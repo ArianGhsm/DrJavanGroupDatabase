@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
-from .models import AnswerResult, EvidencePack
+from drjavanbot.normalization import normalize_text
+from .models import AnswerResult, ClaimSupport, EvidencePack, GroundedClaim
 
 
 class ModelOutputError(ValueError):
@@ -14,14 +16,15 @@ class CitationValidationError(ModelOutputError):
     pass
 
 
-_ALLOWED_CONFIDENCE = {"high", "medium", "low"}
+_ALLOWED_CLAIM_KINDS = {"answer", "finding", "disagreement", "conclusion"}
+_MAX_CLAIMS = 10
+_MAX_SUPPORTS_PER_CLAIM = 4
+_MAX_QUOTE_CHARS = 360
+_LATIN_OR_DIGIT_TOKEN_RE = re.compile(r"(?iu)(?=[\w.-]*[a-z0-9])[\w.-]{2,}")
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
-    """Local-only repair: strip fences / surrounding chatter and parse one object.
-
-    No extra model call is made for repair; malformed content fails closed.
-    """
+    """Local-only repair: strip fences / surrounding chatter and parse one object."""
     text = content.strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -47,34 +50,8 @@ def parse_json_object(content: str) -> dict[str, Any]:
 
 
 def normalize_answer_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize harmless JSON-shape variations without inventing facts.
-
-    Grounding is still enforced later against the evidence pack. This function
-    only converts semantically equivalent scalar/list representations and fills
-    optional presentation fields with empty values.
-    """
+    """Normalize harmless structured-output variations without inventing support."""
     out = dict(payload)
-    for name in ("key_findings", "disagreements", "source_refs"):
-        value = out.get(name)
-        if value is None:
-            out[name] = []
-        elif isinstance(value, str):
-            out[name] = [value]
-
-    ids = out.get("cited_message_ids")
-    if ids is None:
-        out["cited_message_ids"] = []
-    elif isinstance(ids, (int, str)) and not isinstance(ids, bool):
-        out["cited_message_ids"] = [ids]
-    if isinstance(out.get("cited_message_ids"), list):
-        normalized_ids: list[object] = []
-        for value in out["cited_message_ids"]:
-            if isinstance(value, str) and value.strip().isdigit():
-                normalized_ids.append(int(value.strip()))
-            else:
-                normalized_ids.append(value)
-        out["cited_message_ids"] = normalized_ids
-
     insufficient = out.get("insufficient_evidence")
     if isinstance(insufficient, str):
         folded = insufficient.strip().casefold()
@@ -83,88 +60,199 @@ def normalize_answer_payload(payload: dict[str, Any]) -> dict[str, Any]:
         elif folded == "false":
             out["insufficient_evidence"] = False
 
-    out.setdefault("key_findings", [])
-    out.setdefault("disagreements", [])
-    out.setdefault("practical_conclusion", None)
-    out.setdefault("confidence_reason", "")
-    out.setdefault("safety_note_if_needed", None)
+    claims = out.get("claims")
+    if claims is None:
+        out["claims"] = []
+    elif isinstance(claims, dict):
+        out["claims"] = [claims]
     return out
 
 
 def validate_answer_payload(payload: dict[str, Any], pack: EvidencePack, *, question: str) -> AnswerResult:
-    payload = normalize_answer_payload(payload)
-    # Only fields that are essential to factual grounding are hard-required.
-    # Counts and safety text are computed deterministically by the application.
-    required = {
-        "direct_answer", "confidence", "cited_message_ids", "source_refs", "insufficient_evidence",
-    }
-    missing = required - set(payload)
-    if missing:
-        raise ModelOutputError("model output is missing required fields")
+    """Validate every displayable factual claim against an exact archive excerpt.
 
-    direct_answer = _string(payload["direct_answer"], "direct_answer")
-    key_findings = _string_list(payload["key_findings"], "key_findings", max_items=12)
-    disagreements = _string_list(payload["disagreements"], "disagreements", max_items=12)
-    practical = _optional_string(payload["practical_conclusion"], "practical_conclusion")
-    confidence = _string(payload["confidence"], "confidence").casefold()
-    if confidence not in _ALLOWED_CONFIDENCE:
-        raise ModelOutputError("confidence must be high, medium or low")
-    confidence_reason = _optional_string(payload.get("confidence_reason"), "confidence_reason") or "میزان اتکا بر اساس شواهد ارجاع‌شده تعیین شد."
+    The model does not get to assert global citations and then write arbitrary
+    prose. Every supported claim must name a supplied message and quote text that
+    is deterministically present in that exact evidence message. Aggregate source
+    IDs, source refs, evidence counts and confidence are all derived locally.
+    """
+    payload = normalize_answer_payload(payload)
+    if "insufficient_evidence" not in payload:
+        raise ModelOutputError("model output is missing insufficient_evidence")
     insufficient = payload["insufficient_evidence"]
     if not isinstance(insufficient, bool):
         raise ModelOutputError("insufficient_evidence must be boolean")
-    safety = _optional_string(payload.get("safety_note_if_needed"), "safety_note_if_needed")
 
-    cited_ids = _int_list(payload["cited_message_ids"], "cited_message_ids", max_items=50)
-    source_refs = _string_list(payload["source_refs"], "source_refs", max_items=50)
-    invalid_ids = [value for value in cited_ids if value not in pack.message_ids]
-    invalid_refs = [value for value in source_refs if value not in pack.source_refs]
-    if invalid_ids or invalid_refs:
-        raise CitationValidationError("model cited evidence that was not supplied")
-    if not insufficient and not (cited_ids or source_refs):
-        raise CitationValidationError("supported answer must cite supplied evidence")
+    raw_claims = payload.get("claims")
+    if not isinstance(raw_claims, list):
+        raise ModelOutputError("claims must be a list")
+    if len(raw_claims) > _MAX_CLAIMS:
+        raise ModelOutputError("too many claims")
 
-    by_id = {item.message_id: item for item in pack.messages if item.message_id is not None}
+    if insufficient:
+        if raw_claims:
+            raise ModelOutputError("insufficient answer must not contain factual claims")
+        return _insufficient_archive_answer(pack, question=question)
+
+    claims = tuple(_validate_claim(item, pack, question=question) for item in raw_claims)
+    if not claims:
+        raise CitationValidationError("supported answer requires at least one grounded claim")
+    if not any(item.kind == "answer" for item in claims):
+        raise CitationValidationError("supported answer requires an answer claim")
+
+    cited_ids: list[int] = []
+    source_refs: list[str] = []
+    for claim in claims:
+        for support in claim.supports:
+            if support.message_id not in cited_ids:
+                cited_ids.append(support.message_id)
+            if support.source_ref not in source_refs:
+                source_refs.append(support.source_ref)
+
     by_ref = {item.source_ref: item for item in pack.messages}
-    used_refs: set[str] = set(source_refs)
-    for message_id in cited_ids:
-        item = by_id.get(message_id)
-        if item:
-            used_refs.add(item.source_ref)
-    used_items = [by_ref[ref] for ref in sorted(used_refs) if ref in by_ref]
-    authors = {item.author.strip().casefold() for item in used_items if item.author and item.author.strip()}
+    used_items = [by_ref[ref] for ref in source_refs if ref in by_ref]
+    authors = {
+        item.author.strip().casefold()
+        for item in used_items
+        if item.author and item.author.strip()
+    }
     evidence_used = len(used_items)
     independent_authors = len(authors)
+    disagreements = tuple(item.text for item in claims if item.kind == "disagreement")
+    confidence, confidence_reason = _archive_coverage_confidence(
+        evidence_used=evidence_used,
+        independent_authors=independent_authors,
+        has_disagreement=bool(disagreements),
+    )
 
-    # Deterministic confidence guardrails; model cannot claim high confidence
-    # from a single source or hide explicit disagreement.
-    if insufficient:
-        confidence = "low"
-    elif evidence_used <= 1 or independent_authors <= 1:
-        confidence = "low"
-        if not confidence_reason.strip():
-            confidence_reason = "شواهد مستقل محدود است."
-    elif disagreements and confidence == "high":
-        confidence = "medium"
-
-    if _looks_clinically_consequential(question) and not safety:
-        safety = "این پاسخ جمع‌بندی پیام‌های آرشیو است و جایگزین گایدلاین، ارزیابی بیمار یا قضاوت بالینی نیست."
+    answer_texts = [item.text for item in claims if item.kind == "answer"]
+    finding_texts = tuple(item.text for item in claims if item.kind == "finding")
+    conclusion_texts = [item.text for item in claims if item.kind == "conclusion"]
+    safety = _archive_safety_note(question)
 
     return AnswerResult(
-        direct_answer=direct_answer,
-        key_findings=key_findings,
+        direct_answer=" ".join(answer_texts),
+        key_findings=finding_texts,
         disagreements=disagreements,
-        practical_conclusion=practical,
+        practical_conclusion=" ".join(conclusion_texts) if conclusion_texts else None,
         confidence=confidence,
         confidence_reason=confidence_reason,
-        cited_message_ids=tuple(dict.fromkeys(cited_ids)),
-        source_refs=tuple(dict.fromkeys(source_refs)),
+        cited_message_ids=tuple(cited_ids),
+        source_refs=tuple(source_refs),
         evidence_used_count=evidence_used,
         independent_authors_count=independent_authors,
-        insufficient_evidence=insufficient,
+        insufficient_evidence=False,
         safety_note_if_needed=safety,
+        grounded_claims=claims,
         evidence_pack_estimated_tokens=pack.estimated_tokens,
     )
+
+
+def _validate_claim(value: Any, pack: EvidencePack, *, question: str) -> GroundedClaim:
+    if not isinstance(value, dict):
+        raise ModelOutputError("each claim must be an object")
+    kind = _string(value.get("kind"), "claim.kind").casefold()
+    if kind not in _ALLOWED_CLAIM_KINDS:
+        raise ModelOutputError("claim.kind is invalid")
+    text = _string(value.get("text"), "claim.text")
+    if len(text) > 900:
+        raise ModelOutputError("claim.text is too long")
+    raw_supports = value.get("supports")
+    if not isinstance(raw_supports, list) or not raw_supports:
+        raise CitationValidationError("every factual claim requires archive support")
+    if len(raw_supports) > _MAX_SUPPORTS_PER_CLAIM:
+        raise ModelOutputError("claim has too many supports")
+
+    supports: list[ClaimSupport] = []
+    seen: set[tuple[int, str]] = set()
+    for raw_support in raw_supports:
+        support = _validate_support(raw_support, pack)
+        key = (support.message_id, normalize_text(support.quote))
+        if key in seen:
+            continue
+        seen.add(key)
+        supports.append(support)
+    if not supports:
+        raise CitationValidationError("claim has no valid archive support")
+
+    _validate_technical_tokens(text, supports, question=question)
+    return GroundedClaim(kind=kind, text=text, supports=tuple(supports))
+
+
+def _validate_support(value: Any, pack: EvidencePack) -> ClaimSupport:
+    if not isinstance(value, dict):
+        raise ModelOutputError("claim support must be an object")
+    raw_id = value.get("message_id")
+    if isinstance(raw_id, str) and raw_id.strip().isdigit():
+        raw_id = int(raw_id.strip())
+    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+        raise ModelOutputError("support.message_id must be an integer")
+    quote = _string(value.get("quote"), "support.quote")
+    if len(quote) > _MAX_QUOTE_CHARS:
+        raise ModelOutputError("support.quote is too long")
+
+    candidates = [item for item in pack.messages if item.message_id == raw_id]
+    if not candidates:
+        raise CitationValidationError("claim support references a message that was not supplied")
+    normalized_quote = normalize_text(quote)
+    if not normalized_quote:
+        raise CitationValidationError("support quote is empty after normalization")
+    matching = [item for item in candidates if normalized_quote in normalize_text(item.text)]
+    if not matching:
+        raise CitationValidationError("support quote is not present in the cited archive message")
+    item = matching[0]
+    return ClaimSupport(message_id=raw_id, source_ref=item.source_ref, quote=quote.strip())
+
+
+def _validate_technical_tokens(text: str, supports: list[ClaimSupport], *, question: str) -> None:
+    """Reject invented Latin/product/number tokens absent from question and support.
+
+    This deliberately targets high-risk product/model/number hallucinations while
+    still allowing normal Persian paraphrasing. A brand/model token can be used
+    only if the user mentioned it or it literally appears in a verified quote.
+    """
+    permitted = normalize_text(question + " " + " ".join(item.quote for item in supports))
+    for token in _LATIN_OR_DIGIT_TOKEN_RE.findall(normalize_text(text)):
+        if token not in permitted:
+            raise CitationValidationError("claim introduced a technical/product token absent from its archive support")
+
+
+def _archive_coverage_confidence(*, evidence_used: int, independent_authors: int, has_disagreement: bool) -> tuple[str, str]:
+    if evidence_used >= 4 and independent_authors >= 3 and not has_disagreement:
+        level = "high"
+    elif evidence_used >= 2 and independent_authors >= 2:
+        level = "medium"
+    else:
+        level = "low"
+    reason = f"پشتیبانی آرشیوی: {evidence_used} پیام از {independent_authors} نویسنده مستقل."
+    if has_disagreement:
+        reason += " در پیام‌های بازیابی‌شده اختلاف‌نظر هم وجود دارد."
+    return level, reason
+
+
+def _insufficient_archive_answer(pack: EvidencePack, *, question: str) -> AnswerResult:
+    return AnswerResult(
+        direct_answer="در پیام‌های گروه، شواهد کافی برای پاسخ به این سؤال پیدا نشد.",
+        key_findings=(),
+        disagreements=(),
+        practical_conclusion=None,
+        confidence="low",
+        confidence_reason="شواهد قابل استناد کافی در آرشیو گروه پیدا نشد.",
+        cited_message_ids=(),
+        source_refs=(),
+        evidence_used_count=0,
+        independent_authors_count=0,
+        insufficient_evidence=True,
+        safety_note_if_needed=_archive_safety_note(question),
+        grounded_claims=(),
+        evidence_pack_estimated_tokens=pack.estimated_tokens,
+    )
+
+
+def _archive_safety_note(question: str) -> str | None:
+    if not _looks_clinically_consequential(question):
+        return None
+    return "این فقط جمع‌بندی پیام‌های گروه است؛ گایدلاین یا توصیه مستقل هوش مصنوعی نیست."
 
 
 def parse_query_variants(content: str, *, original: str, limit: int = 6) -> tuple[str, ...]:
@@ -198,39 +286,6 @@ def _string(value: Any, name: str) -> str:
     if not text:
         raise ModelOutputError(f"{name} cannot be empty")
     return text
-
-
-def _optional_string(value: Any, name: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ModelOutputError(f"{name} must be string or null")
-    text = value.strip()
-    return text or None
-
-
-def _string_list(value: Any, name: str, *, max_items: int) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise ModelOutputError(f"{name} must be a list")
-    out: list[str] = []
-    for item in value[:max_items]:
-        if not isinstance(item, str):
-            raise ModelOutputError(f"{name} must contain strings")
-        text = item.strip()
-        if text:
-            out.append(text)
-    return tuple(out)
-
-
-def _int_list(value: Any, name: str, *, max_items: int) -> tuple[int, ...]:
-    if not isinstance(value, list):
-        raise ModelOutputError(f"{name} must be a list")
-    out: list[int] = []
-    for item in value[:max_items]:
-        if isinstance(item, bool) or not isinstance(item, int):
-            raise ModelOutputError(f"{name} must contain integers")
-        out.append(item)
-    return tuple(out)
 
 
 def _looks_clinically_consequential(question: str) -> bool:
