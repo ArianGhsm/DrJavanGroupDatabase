@@ -58,14 +58,15 @@ def test_planner_detects_age_population_facets_and_balances_family_schedule():
             {"name": "population", "queries": ["کودک", "بچه", "اطفال", "pediatric"]},
             {"name": "stage", "queries": ["دندان مختلط", "mixed dentition", "فاز اول", "interceptive"]},
             {"name": "intersection", "queries": ["سن ارتودنسی", "شروع ارتودنسی", "ارتودنسی کودک", "early orthodontic"]},
-            {"name": "experience", "queries": ["ارتودنسی تجربه", "orthodontic experience", "ارتودنسی شروع", "ارتودنسی بچه"]},
+            {"name": "experience", "queries": ["نظر درباره ارتودنسی", "تجربه درمان ارتودنسی", "orthodontic opinion", "orthodontic case"]},
         ],
         "phrases": [], "exclude_terms": [], "low_information_terms": [], "reply_context": True,
     }
     plan = parse_search_plan(json.dumps(payload, ensure_ascii=False), question=question)
     assert {"timing_age", "pediatric_population"}.issubset(set(plan.required_aspects))
-    first_round = [name for name, _ in plan.queries[:6]]
-    assert len(set(first_round)) == 6
+    assert len(plan.query_families) == 6
+    first_round = [name for name, _ in plan.queries[:len(plan.query_families)]]
+    assert set(first_round) == {family.name for family in plan.query_families}
     assert len(plan.queries) <= 20
     assert plan_requires_deep_retrieval(plan)
 
@@ -141,7 +142,6 @@ def test_different_facets_in_neighbor_messages_bridge_into_one_discussion():
     assert report.families_with_hits >= 3
     assert any("conversation_bridge" in candidate.match_reasons for candidate in report.candidates[:3])
     assert any(candidate.context for candidate in report.candidates[:3])
-    # Bridged threads get a wider bounded context window than isolated hits.
     assert any(before >= 5 and after >= 6 for _, before, after in backend.context_calls)
 
 
