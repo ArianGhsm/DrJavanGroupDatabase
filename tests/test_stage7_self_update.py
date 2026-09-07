@@ -80,7 +80,9 @@ def test_owner_settings_expose_update_and_confirmation_requests_only_fixed_actio
     keyboard=app.api.sent[-1][2]["reply_markup"]["inline_keyboard"]
     assert any(button["callback_data"]=="software_update" for row in keyboard for button in row)
     app._handle_callback(_callback(42,"software_update_confirm"))
-    assert app.services.update_requests==1 and "درخواست آپدیت" in app.api.edited[-1][2]
+    confirmation=str(app.api.edited[-1][2])
+    assert app.services.update_requests==1
+    assert "درخواست" in confirmation and "ثبت شد" in confirmation and "abc123" in confirmation
 
 
 def test_non_owner_cannot_trigger_update():
