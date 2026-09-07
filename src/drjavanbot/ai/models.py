@@ -81,6 +81,59 @@ class EvidencePack:
 
 
 @dataclass(frozen=True, slots=True)
+class ClaimSupport:
+    """A locally verified excerpt from one supplied archive message."""
+
+    message_id: int
+    source_ref: str
+    quote: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "source_ref": self.source_ref,
+            "quote": self.quote,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ClaimSupport":
+        return cls(
+            message_id=int(value["message_id"]),
+            source_ref=str(value.get("source_ref", "")),
+            quote=str(value.get("quote", "")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GroundedClaim:
+    """One displayable statement whose supports were verified against EVIDENCE."""
+
+    kind: str
+    text: str
+    supports: tuple[ClaimSupport, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "text": self.text,
+            "supports": [item.to_dict() for item in self.supports],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "GroundedClaim":
+        supports = value.get("supports", [])
+        return cls(
+            kind=str(value.get("kind", "finding")),
+            text=str(value.get("text", "")),
+            supports=tuple(
+                ClaimSupport.from_dict(item)
+                for item in supports
+                if isinstance(item, dict) and "message_id" in item
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AnswerResult:
     direct_answer: str
     key_findings: tuple[str, ...]
@@ -94,6 +147,7 @@ class AnswerResult:
     independent_authors_count: int
     insufficient_evidence: bool
     safety_note_if_needed: str | None
+    grounded_claims: tuple[GroundedClaim, ...] = field(default_factory=tuple)
     cache_hit: bool = False
     ai_calls: int = 0
     expansion_used: bool = False
@@ -121,6 +175,7 @@ class AnswerResult:
             "independent_authors_count": self.independent_authors_count,
             "insufficient_evidence": self.insufficient_evidence,
             "safety_note_if_needed": self.safety_note_if_needed,
+            "grounded_claims": [item.to_dict() for item in self.grounded_claims],
             "cache_hit": self.cache_hit,
             "ai_calls": self.ai_calls,
             "expansion_used": self.expansion_used,
@@ -129,6 +184,7 @@ class AnswerResult:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "AnswerResult":
+        claims = value.get("grounded_claims", [])
         return cls(
             direct_answer=str(value.get("direct_answer", "")),
             key_findings=tuple(str(x) for x in value.get("key_findings", [])),
@@ -142,6 +198,9 @@ class AnswerResult:
             independent_authors_count=int(value.get("independent_authors_count", 0)),
             insufficient_evidence=bool(value.get("insufficient_evidence", False)),
             safety_note_if_needed=_optional_str(value.get("safety_note_if_needed")),
+            grounded_claims=tuple(
+                GroundedClaim.from_dict(item) for item in claims if isinstance(item, dict)
+            ),
             cache_hit=bool(value.get("cache_hit", False)),
             ai_calls=int(value.get("ai_calls", 0)),
             expansion_used=bool(value.get("expansion_used", False)),
