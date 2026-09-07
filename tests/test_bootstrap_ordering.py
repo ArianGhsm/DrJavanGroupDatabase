@@ -25,6 +25,7 @@ def test_bootstrap_repairs_legacy_env_before_release_prepare_and_tests(tmp_path,
     events: list[str] = []
 
     monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(module, "LOCK_FILE", tmp_path / "updater.lock")
     monkeypatch.setattr(
         module,
         "_preflight",
