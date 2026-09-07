@@ -45,20 +45,34 @@ Telegram HTML Export
 
 هیچ Bot Token، AvalAI/DeepSeek API Key یا credential سرور نباید داخل Git commit شود.
 
-`.env.example` فقط متغیرهای غیرحساس/placeholder را تعریف می‌کند. مالک ربات با **Telegram numeric user ID** (`TELEGRAM_OWNER_ID`) احراز می‌شود، نه username. قابلیت تنظیم امن AvalAI API Key توسط مالک از private chat تلگرام در مراحل بعدی پیاده‌سازی خواهد شد و کلید واقعی داخل Git قرار نمی‌گیرد.
+`.env.example` فقط متغیرهای غیرحساس/placeholder را تعریف می‌کند. مالک ربات با **Telegram numeric user ID** (`TELEGRAM_OWNER_ID`) احراز می‌شود، نه username. AvalAI API Key بعد از بالا آمدن ربات توسط مالک و فقط در private chat از `/settings` تنظیم می‌شود؛ پیام کلید best-effort حذف، کلید قبل از ذخیره validate و سپس خارج از Git در `runtime/secrets/` با دسترسی محدود نگه‌داری می‌شود.
 
 ## راه‌اندازی در سطح کلی
 
-در پایان مراحل توسعه، جریان production به‌صورت زیر خواهد بود:
+جریان production پس از Stage 5/6:
 
 1. dependencyها نصب شوند.
-2. `.env` خارج از Git با `TELEGRAM_BOT_TOKEN` و `TELEGRAM_OWNER_ID` ساخته شود.
-3. archive با command مربوطه index/reindex شود.
+2. `.env` خارج از Git فقط با `TELEGRAM_BOT_TOKEN`، `TELEGRAM_OWNER_ID` و تنظیمات غیرحساس ساخته شود.
+3. archive با `python -m drjavanbot index` یا `reindex` آماده شود.
 4. health/integrity بررسی شود.
-5. process ربات اجرا شود.
-6. مالک AvalAI API Key را از داخل private chat ربات تنظیم کند.
+5. process ربات با `python -m drjavanbot.telegram` یا `drjavanbot-bot` اجرا شود.
+6. مالک در private chat از `/settings` کلید AvalAI را تنظیم و تست کند؛ restart لازم نیست.
 
-مرحله ۱ فقط معماری، قراردادها و skeleton را ایجاد می‌کند و deployment انجام نمی‌دهد.
+جزئیات Telegram/Owner در [`docs/telegram-bot.md`](docs/telegram-bot.md) ثبت شده است. **API Key AvalAI به Codex داده نمی‌شود و در `.env` قرار نمی‌گیرد.**
+
+## پنل مالک و دسترسی
+
+Stage 4 این قابلیت‌ها را پیاده‌سازی کرده است:
+
+- `/settings`, `/health`, `/stats`, `/reindex` فقط برای مالک و private chat؛
+- تنظیم/تعویض/حذف/تست AvalAI API Key؛
+- انتخاب مدل فقط از allowlist `deepseek-v4-flash` / `deepseek-v4-pro`؛
+- آمار سؤال‌ها، cache، AI token/cost، index و آخرین reindex؛
+- `owner_only` (پیش‌فرض)، `allowlist` و `public`؛
+- `/allow NUMERIC_ID` و `/deny NUMERIC_ID`؛
+- rate limit per-user، duplicate-update protection، long-message chunking؛
+- منابع paginated و user-bound بدون ارسال raw archive؛
+- reindex قفل‌دار با حفظ last-known-good index و cache invalidation پس از موفقیت.
 
 ---
 
