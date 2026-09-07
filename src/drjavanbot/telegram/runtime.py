@@ -36,6 +36,7 @@ class PollingRunner:
         self.app = app; self.api = api; self.config = config
         self.stop_event = threading.Event()
         self.executor = ThreadPoolExecutor(max_workers=config.worker_count, thread_name_prefix="drjavan-update")
+        self.update_monitor_thread: threading.Thread | None = None
 
     def stop(self, *_args) -> None: self.stop_event.set()
 
@@ -46,19 +47,36 @@ class PollingRunner:
             return
         try:
             setter(_PUBLIC_COMMANDS)
-            setter(
-                _OWNER_COMMANDS,
-                scope={"type": "chat", "chat_id": self.app.owner_id},
-            )
+            setter(_OWNER_COMMANDS, scope={"type": "chat", "chat_id": self.app.owner_id})
             _LOG.info("telegram_command_menus_configured owner_id=%d", self.app.owner_id)
         except TelegramAPIError as exc:
-            # Command-menu discoverability must never prevent the bot from starting.
             _LOG.warning("telegram_command_menu_failed error_class=%s", type(exc).__name__)
+
+    def _check_updates_once(self) -> None:
+        checker = getattr(self.app, "notify_update_if_available", None)
+        if not callable(checker):
+            return
+        try:
+            checker(force=False)
+        except Exception as exc:
+            _LOG.warning("github_update_check_failed error_class=%s", type(exc).__name__)
+
+    def _update_monitor(self) -> None:
+        # Immediate startup check, then the configured interval (default 5 min).
+        self._check_updates_once()
+        while not self.stop_event.wait(self.config.update_check_interval_seconds):
+            self._check_updates_once()
 
     def run(self) -> None:
         offset: int | None = None
         me = self.api.get_me(); _LOG.info("telegram_bot_started bot_id=%s", me.get("id"))
         self._configure_command_menus()
+        self.update_monitor_thread = threading.Thread(
+            target=self._update_monitor,
+            name="drjavan-github-update-check",
+            daemon=True,
+        )
+        self.update_monitor_thread.start()
         try:
             while not self.stop_event.is_set():
                 try:
@@ -86,6 +104,9 @@ class PollingRunner:
                     _LOG.error("telegram_poll_api_error error_class=%s",type(exc).__name__)
                     if self.stop_event.wait(5.0): break
         finally:
+            self.stop_event.set()
+            if self.update_monitor_thread is not None:
+                self.update_monitor_thread.join(timeout=2.0)
             self.executor.shutdown(wait=True,cancel_futures=False); _LOG.info("telegram_bot_stopped")
 
 
