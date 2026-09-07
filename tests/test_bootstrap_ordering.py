@@ -37,6 +37,7 @@ def test_bootstrap_repairs_legacy_env_before_release_prepare_and_tests(tmp_path,
         lambda resolved_sha, python_exe: (events.append("prepare_release") or release),
     )
     monkeypatch.setattr(module, "_run_release_tests", lambda path: events.append("run_tests"))
+    monkeypatch.setattr(module, "_make_release_runtime_readable", lambda path: events.append("publish_release"))
     monkeypatch.setattr(module, "_active_release", lambda: None)
     monkeypatch.setattr(module, "_snapshot_units", lambda: {})
     monkeypatch.setattr(module, "_switch_current", lambda path: events.append("switch_current"))
@@ -46,4 +47,5 @@ def test_bootstrap_repairs_legacy_env_before_release_prepare_and_tests(tmp_path,
     monkeypatch.setattr(module, "_wait_service_active", lambda: events.append("service_active"))
 
     assert module.main() == 0
-    assert events[:3] == ["repair_env", "prepare_release", "run_tests"]
+    assert events[:4] == ["repair_env", "prepare_release", "run_tests", "publish_release"]
+    assert events.index("publish_release") < events.index("switch_current")
