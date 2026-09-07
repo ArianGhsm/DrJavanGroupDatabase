@@ -12,6 +12,7 @@ class TelegramConfig:
     default_rate_limit_per_minute: int = 6
     key_entry_timeout_seconds: int = 300
     source_session_ttl_seconds: int = 3600
+    update_check_interval_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> "TelegramConfig":
@@ -22,6 +23,7 @@ class TelegramConfig:
             default_rate_limit_per_minute=_int("DRJAVAN_TG_RATE_LIMIT_PER_MINUTE", 6, 1, 60),
             key_entry_timeout_seconds=_int("DRJAVAN_TG_KEY_ENTRY_TIMEOUT_SECONDS", 300, 60, 1800),
             source_session_ttl_seconds=_int("DRJAVAN_TG_SOURCE_SESSION_TTL_SECONDS", 3600, 300, 86400),
+            update_check_interval_seconds=_int("DRJAVAN_TG_UPDATE_CHECK_INTERVAL_SECONDS", 300, 60, 3600),
         )
 
 def _int(name: str, default: int, low: int, high: int) -> int:
