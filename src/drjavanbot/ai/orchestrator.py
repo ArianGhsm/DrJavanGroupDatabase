@@ -23,7 +23,7 @@ from .prompts import (
 )
 from .provider import AvalAIClient
 from .telemetry import TelemetryStore
-from .validation import parse_json_object, parse_query_variants, validate_answer_payload
+from .validation import CitationValidationError, ModelOutputError, parse_json_object, parse_query_variants, validate_answer_payload
 
 
 class AIConfigurationError(RuntimeError):
@@ -57,8 +57,10 @@ class ArchiveAnswerService:
     def answer(self, question: str) -> AnswerResult:
         question = question.strip()
         normalized = normalize_text(question)
+        # Punctuation-only/emoji-only questions are not searchable evidence queries.
+        # Treat them as insufficient instead of leaking an internal ValueError to Telegram.
         if not normalized:
-            raise ValueError("question cannot be empty")
+            return _not_searchable_answer()
 
         index_version = _index_fingerprint(self.backend)
         cache_key = _cache_key(normalized, index_version, self.config)
@@ -77,14 +79,19 @@ class ArchiveAnswerService:
             if not api_key:
                 raise AIConfigurationError("AvalAI API key is not configured")
             observed = _observed_terms(candidates)
-            _, variants = self._call_processed(
-                request_type="expansion",
-                api_key=api_key,
-                system_prompt=QUERY_EXPANSION_SYSTEM_PROMPT,
-                user_prompt=query_expansion_user_prompt(question, observed),
-                max_output_tokens=self.config.expansion_max_output_tokens,
-                processor=lambda content: parse_query_variants(content, original=question),
-            )
+            try:
+                _, variants = self._call_processed(
+                    request_type="expansion",
+                    api_key=api_key,
+                    system_prompt=QUERY_EXPANSION_SYSTEM_PROMPT,
+                    user_prompt=query_expansion_user_prompt(question, observed),
+                    max_output_tokens=self.config.expansion_max_output_tokens,
+                    processor=lambda content: parse_query_variants(content, original=question),
+                )
+            except (ModelOutputError, CitationValidationError):
+                # Expansion is optional. A malformed expansion must never turn a
+                # usable local retrieval into a user-visible internal error.
+                variants = ()
             ai_calls += 1
             if variants:
                 expansion_used = True
@@ -110,15 +117,28 @@ class ArchiveAnswerService:
             raise AIConfigurationError("AvalAI API key is not configured")
 
         budget = self.config.budget_for(question)
-        _, answer = self._call_processed(
+        synthesis_kwargs = dict(
             request_type="synthesis",
             api_key=api_key,
             system_prompt=SYNTHESIS_SYSTEM_PROMPT,
             user_prompt=synthesis_user_prompt(pack),
             max_output_tokens=budget.max_output_tokens,
-            processor=lambda content: validate_answer_payload(parse_json_object(content), pack, question=question),
+            processor=lambda content: _validate_synthesis_content(content, pack, question),
         )
-        ai_calls += 1
+        try:
+            _, answer = self._call_processed(**synthesis_kwargs)
+            ai_calls += 1
+        except (ModelOutputError, CitationValidationError):
+            # DeepSeek JSON mode can rarely return empty/incomplete content. Retry
+            # exactly once; normal successful requests still use one synthesis call.
+            ai_calls += 1
+            try:
+                _, answer = self._call_processed(**synthesis_kwargs)
+                ai_calls += 1
+            except (ModelOutputError, CitationValidationError):
+                ai_calls += 1
+                answer = _structured_output_failure_answer(ai_calls=ai_calls, expansion_used=expansion_used)
+
         answer = replace(
             answer,
             cache_hit=False,
@@ -126,7 +146,8 @@ class ArchiveAnswerService:
             expansion_used=expansion_used,
             evidence_pack_estimated_tokens=pack.estimated_tokens,
         )
-        if self.cache is not None:
+        # Do not cache a transient structured-output failure; a later retry may succeed.
+        if self.cache is not None and not answer.transient_failure:
             self.cache.set(cache_key, answer)
         return answer
 
@@ -173,6 +194,23 @@ class ArchiveAnswerService:
         return result, processed
 
 
+def _validate_synthesis_content(content: str, pack, question: str) -> AnswerResult:
+    payload = parse_json_object(content)
+    # JSON mode guarantees a JSON object, not application-level field types.
+    # Accept numeric citation strings only after deterministic conversion; the
+    # validator still rejects every id/ref that was not present in the evidence pack.
+    ids = payload.get("cited_message_ids")
+    if isinstance(ids, list):
+        normalized_ids: list[object] = []
+        for value in ids:
+            if isinstance(value, str) and value.strip().isdigit():
+                normalized_ids.append(int(value.strip()))
+            else:
+                normalized_ids.append(value)
+        payload["cited_message_ids"] = normalized_ids
+    return validate_answer_payload(payload, pack, question=question)
+
+
 def _observed_terms(candidates: Sequence[EvidenceCandidate]) -> tuple[str, ...]:
     terms: list[str] = []
     seen: set[str] = set()
@@ -205,6 +243,31 @@ def _index_fingerprint(backend: SearchBackend) -> str:
 def _cache_key(normalized_question: str, index_version: str, config: AIConfig) -> str:
     raw = "\n".join((normalized_question, index_version, PROMPT_VERSION, config.model, config.cache_signature())).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _not_searchable_answer() -> AnswerResult:
+    return AnswerResult(
+        direct_answer="سؤال قابل جست‌وجویی در پیام شما پیدا نشد. لطفاً سؤال را با چند واژه مشخص بفرستید.",
+        key_findings=(), disagreements=(), practical_conclusion=None,
+        confidence="low", confidence_reason="عبارت جست‌وجوی معناداری وجود ندارد.",
+        cited_message_ids=(), source_refs=(), evidence_used_count=0,
+        independent_authors_count=0, insufficient_evidence=True,
+        safety_note_if_needed=None, cache_hit=False, ai_calls=0,
+        expansion_used=False, evidence_pack_estimated_tokens=0,
+    )
+
+
+def _structured_output_failure_answer(*, ai_calls: int, expansion_used: bool) -> AnswerResult:
+    return AnswerResult(
+        direct_answer="پاسخ ساختاری سرویس AI این بار معتبر نبود. لطفاً همان سؤال را دوباره بفرستید.",
+        key_findings=(), disagreements=(), practical_conclusion=None,
+        confidence="low", confidence_reason="خروجی مدل پس از یک retry محدود قابل اعتبارسنجی نبود.",
+        cited_message_ids=(), source_refs=(), evidence_used_count=0,
+        independent_authors_count=0, insufficient_evidence=True,
+        safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
+        expansion_used=expansion_used, evidence_pack_estimated_tokens=0,
+        transient_failure=True,
+    )
 
 
 def _insufficient_answer(*, ai_calls: int, expansion_used: bool) -> AnswerResult:
