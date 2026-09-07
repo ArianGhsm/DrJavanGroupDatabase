@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import Mapping
 
@@ -27,6 +28,7 @@ _STEPS = (
     "بررسی گفت‌وگوهای مرتبط",
     "جمع‌بندی و اعتبارسنجی شواهد",
 )
+_HEARTBEAT_SECONDS = 5.0
 
 
 class QuestionProgressReporter:
@@ -35,6 +37,10 @@ class QuestionProgressReporter:
     This is deliberately not a chain-of-thought transport. It receives only the
     safe operational milestones emitted by ``ArchiveAnswerService`` and never
     model prompts, hidden reasoning, unvalidated excerpts or user secrets.
+
+    A lightweight heartbeat refreshes only elapsed time and the Telegram typing
+    action while a slow provider call is in flight. It never invokes retrieval or
+    AI and therefore cannot duplicate business work.
     """
 
     def __init__(self, api, chat_id: int) -> None:
@@ -44,6 +50,9 @@ class QuestionProgressReporter:
         self.started_at = time.monotonic()
         self.last_stage = "accepted"
         self.last_details: dict[str, object] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
 
     def start(self) -> None:
         self._typing()
@@ -58,27 +67,65 @@ class QuestionProgressReporter:
             return
         if isinstance(result, Mapping):
             try:
-                self.message_id = int(result.get("message_id"))
+                message_id = int(result.get("message_id"))
             except (TypeError, ValueError):
-                self.message_id = None
+                message_id = None
+            with self._lock:
+                self.message_id = message_id
+        if self.message_id is not None:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat,
+                name=f"drjavan-progress-{self.chat_id}",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
 
     def on_event(self, stage: str, details: dict[str, object]) -> None:
         stage = str(stage or "").strip().casefold()
         if stage not in _STAGE_STEP:
             return
-        self.last_stage = stage
-        self.last_details = dict(details or {})
+        with self._lock:
+            self.last_stage = stage
+            self.last_details = dict(details or {})
         self._typing()
-        if self.message_id is None:
+        self._refresh()
+
+    def close(self) -> None:
+        """Remove the transient status after the final answer/error is visible."""
+        self._stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
+        with self._lock:
+            message_id = self.message_id
+            self.message_id = None
+        if message_id is None:
+            return
+        try:
+            self.api.delete_message(self.chat_id, message_id)
+        except Exception:
+            pass
+
+    def _heartbeat(self) -> None:
+        while not self._stop.wait(_HEARTBEAT_SECONDS):
+            self._typing()
+            self._refresh()
+
+    def _refresh(self) -> None:
+        with self._lock:
+            message_id = self.message_id
+            stage = self.last_stage
+            details = dict(self.last_details)
+        if message_id is None or self._stop.is_set():
             return
         try:
             self.api.edit_message_text(
                 self.chat_id,
-                self.message_id,
+                message_id,
                 rich_text(
                     _progress_screen(
                         stage,
-                        self.last_details,
+                        details,
                         elapsed=max(0.0, time.monotonic() - self.started_at),
                     )
                 ),
@@ -88,16 +135,6 @@ class QuestionProgressReporter:
             return
         except Exception:
             return
-
-    def close(self) -> None:
-        """Remove the transient status after the final answer/error is visible."""
-        if self.message_id is None:
-            return
-        try:
-            self.api.delete_message(self.chat_id, self.message_id)
-        except Exception:
-            pass
-        self.message_id = None
 
     def _typing(self) -> None:
         try:
