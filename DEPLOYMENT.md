@@ -48,6 +48,8 @@ sudo chown root:root /etc/drjavanbot/drjavanbot.env
 
 This is the normal path for the current server.
 
+**Important:** do not source the existing runtime env before bootstrap. Older installations may still contain the historical unquoted Persian archive path. Repository pytest does not need runtime secrets or the production env.
+
 ```bash
 cd /opt/drjavanbot/app
 git fetch origin main
@@ -56,16 +58,18 @@ pytest -q
 sudo python3 deploy/bootstrap_self_update.py
 ```
 
+At the start of bootstrap, after repository/user/prerequisite preflight and before release preparation/tests, the bootstrap atomically repairs `DRJAVAN_ARCHIVE_DIR` to the quoted `current` path while preserving every other env line plus the file owner/mode. That repair is intentionally retained even if a later bootstrap gate fails.
+
 Bootstrap is idempotent and performs these checks before switching the live service:
 
 - repository origin is exactly the expected HTTPS GitHub repository;
 - tracked working tree is clean;
 - Python is 3.11+ and SQLite FTS5 works;
 - archive, env file and systemd unit sources exist;
+- legacy archive env entry is repaired before release tests;
 - release worktree really points to the requested commit;
 - release dependencies are reconciled even after an interrupted prior attempt;
 - compile + full pytest run with a private temporary directory and explicit pytest `--basetemp`;
-- `DRJAVAN_ARCHIVE_DIR` is rewritten atomically to the quoted `current` path;
 - existing release history is preserved;
 - only DrJavanBot systemd units are installed/restarted.
 
@@ -87,7 +91,7 @@ Expected:
 
 ## Safe manual smoke without editing env
 
-Because the env file now uses shell-safe quoting, it can be sourced when an operator needs a manual smoke check:
+Only after successful bootstrap, the repaired env can safely be sourced for manual checks:
 
 ```bash
 set -a
