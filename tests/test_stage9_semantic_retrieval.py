@@ -71,7 +71,7 @@ def _plan(*, searchable=True, families=None):
     return json.dumps({
         "searchable":searchable,"intent":"recommendation_comparison","core_concepts":["کامپوزیت"],
         "aliases":["composite"],"optional_concepts":["تجربه","پیشنهاد"],"entity_types":["product_or_brand"],
-        "query_families":families or [
+        "query_families":families if families is not None else [
             {"name":"topic","queries":["کامپوزیت","composite"]},
             {"name":"experience","queries":["کامپوزیت تجربه"]},
         ],
@@ -150,13 +150,17 @@ def test_weak_path_never_makes_fourth_call_for_malformed_synthesis():
     assert len(provider.calls)==3
 
 
-def test_malformed_planner_falls_back_without_turning_model_memory_into_evidence():
+def test_malformed_planner_falls_back_and_refines_without_model_memory_as_evidence():
     evidence=(_candidate(1,"A","کامپوزیت واقعی آرشیو"),_candidate(2,"B","کامپوزیت واقعی دوم"))
-    backend=RoutingBackend({"کامپوزیت":evidence,"برند کامپوزیت":evidence})
-    provider=SequenceProvider(["not-json",_answer()])
+    backend=RoutingBackend({"کامپوزیت":evidence,"برند کامپوزیت":evidence,"refined":evidence})
+    provider=SequenceProvider([
+        "not-json",
+        json.dumps({"query_families":[{"name":"refined","queries":["refined"]}]}),
+        _answer(),
+    ])
     result=ArchiveAnswerService(backend=backend,secret_store=Secrets(),config=AIConfig(),provider=provider).answer("برند کامپوزیت")
-    assert result.ai_calls==2 and not result.insufficient_evidence
-    assert provider.calls[0]["request_type"]=="search_plan"
+    assert result.ai_calls==3 and not result.insufficient_evidence
+    assert [c["request_type"] for c in provider.calls]==["search_plan","search_refinement","synthesis"]
 
 
 def test_planner_cache_is_bound_to_index_fingerprint(tmp_path: Path):
