@@ -105,8 +105,10 @@ def test_owner_start_checks_for_update_and_shows_install_button():
     app = TelegramBotApp(api=api, owner_id=42, services=services, state=FakeState(), config=TelegramConfig())
     app._handle_command(42, 42, True, "/start")
     assert len(api.sent) == 2
-    assert "پنل مالک" in api.sent[0][1]
+    assert "پنل مدیریت" in api.sent[0][1]
     assert "نسخه جدید" in api.sent[1][1]
+    home_keyboard = api.sent[0][2]["reply_markup"]["inline_keyboard"]
+    assert any(button["callback_data"] == "settings" for row in home_keyboard for button in row)
     keyboard = api.sent[1][2]["reply_markup"]["inline_keyboard"]
     assert any(button["callback_data"] == "software_update_confirm" for row in keyboard for button in row)
 
