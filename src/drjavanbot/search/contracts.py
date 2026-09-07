@@ -20,6 +20,10 @@ class SearchQuery:
     context_before: int | None = None
     context_after: int | None = None
     reply_depth: int = 3
+    # Direct/legacy search keeps context by default. Semantic multi-query
+    # retrieval can defer it until after score fusion to avoid expanding dozens
+    # of losing candidates from every query family.
+    include_context: bool = True
 
 
 @dataclass(frozen=True, slots=True)
