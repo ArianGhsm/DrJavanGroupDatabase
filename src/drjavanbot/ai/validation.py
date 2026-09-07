@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from drjavanbot.normalization import normalize_text
@@ -20,7 +19,6 @@ _ALLOWED_CLAIM_KINDS = {"answer", "finding", "disagreement", "conclusion"}
 _MAX_CLAIMS = 10
 _MAX_SUPPORTS_PER_CLAIM = 4
 _MAX_QUOTE_CHARS = 360
-_LATIN_OR_DIGIT_TOKEN_RE = re.compile(r"(?iu)(?=[\w.-]*[a-z0-9])[\w.-]{2,}")
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
@@ -207,14 +205,24 @@ def _validate_support(value: Any, pack: EvidencePack) -> ClaimSupport:
 def _validate_technical_tokens(text: str, supports: list[ClaimSupport], *, question: str) -> None:
     """Reject invented Latin/product/number tokens absent from question and support.
 
-    This deliberately targets high-risk product/model/number hallucinations while
-    still allowing normal Persian paraphrasing. A brand/model token can be used
-    only if the user mentioned it or it literally appears in a verified quote.
+    Tokens are compared exactly after the same Persian/English normalization used
+    by retrieval. This prevents substring loopholes (for example 250 vs 2500) and
+    covers single-character model components and single-digit numbers too.
     """
-    permitted = normalize_text(question + " " + " ".join(item.quote for item in supports))
-    for token in _LATIN_OR_DIGIT_TOKEN_RE.findall(normalize_text(text)):
-        if token not in permitted:
-            raise CitationValidationError("claim introduced a technical/product token absent from its archive support")
+    permitted = _technical_tokens(question + " " + " ".join(item.quote for item in supports))
+    introduced = _technical_tokens(text) - permitted
+    if introduced:
+        raise CitationValidationError("claim introduced a technical/product token absent from its archive support")
+
+
+def _technical_tokens(value: str) -> set[str]:
+    out: set[str] = set()
+    for token in normalize_text(value).split():
+        has_ascii_alpha = any("a" <= ch <= "z" for ch in token)
+        has_digit = any(ch.isdigit() for ch in token)
+        if has_ascii_alpha or has_digit:
+            out.add(token)
+    return out
 
 
 def _archive_coverage_confidence(*, evidence_used: int, independent_authors: int, has_disagreement: bool) -> tuple[str, str]:
