@@ -49,21 +49,15 @@ def main() -> int:
         _run([str(venv / "bin/python"), "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release)
         _run([str(venv / "bin/python"), "-m", "pip", "install", "--no-deps", "."], cwd=release)
 
-    # Do not let pytest reuse /tmp/pytest-of-* created by another account or a
-    # previous privileged invocation.  A dedicated root-owned temp tree makes
-    # bootstrap repeatable on servers where multiple bots/tests share /tmp.
+    # Never inherit a stale pytest temp tree from another/root process.
     with tempfile.TemporaryDirectory(prefix="drjavanbot-bootstrap-", dir="/var/tmp") as temp_root:
         test_env = dict(os.environ)
-        test_env["TMPDIR"] = temp_root
-        test_env["TEMP"] = temp_root
-        test_env["TMP"] = temp_root
-        pytest_base = str(Path(temp_root) / "pytest")
+        test_env.update({"TMPDIR": temp_root, "TEMP": temp_root, "TMP": temp_root})
         _run(
-            [str(venv / "bin/python"), "-m", "pytest", "-q", "--basetemp", pytest_base],
+            [str(venv / "bin/python"), "-m", "pytest", "-q", "--basetemp", str(Path(temp_root) / "pytest")],
             cwd=release,
             env=test_env,
         )
-
     (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
 
     temp_link = CURRENT.parent / ".current.bootstrap"
@@ -95,7 +89,8 @@ def main() -> int:
 def _rewrite_env_archive_path() -> None:
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
     key = "DRJAVAN_ARCHIVE_DIR="
-    replacement = key + "/opt/drjavanbot/current/گروه دکتر جوان"
+    # Keep this value valid for both systemd EnvironmentFile parsing and shell sourcing.
+    replacement = key + '"/opt/drjavanbot/current/گروه دکتر جوان"'
     found = False
     output = []
     for line in lines:
@@ -143,7 +138,11 @@ def _text(cmd: list[str]) -> str:
     return subprocess.check_output(cmd, text=True)
 
 
-def _run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+def _run(
+    cmd: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=True)
 
 
