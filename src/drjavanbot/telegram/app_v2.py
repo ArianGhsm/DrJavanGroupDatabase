@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import sqlite3
 
 from .app import TelegramBotApp as CoreTelegramBotApp
-from .rendering import html_escape, inline_keyboard
+from .rendering import RichScreen, html_escape, inline_keyboard, rich_text
 
 _UPDATE_CALLBACKS = {
     "software_update",
@@ -18,22 +18,36 @@ _UPDATE_CALLBACKS = {
 class TelegramBotApp(CoreTelegramBotApp):
     """Owner updater/diagnostics UI layered over the stable Telegram handler."""
 
+    def __init__(self, *, api, owner_id, services, state, config) -> None:
+        super().__init__(api=api, owner_id=owner_id, services=services, state=state, config=config)
+        # One presentation rollback flag; business behavior is unaffected.
+        if hasattr(self.api, "rich_ui_enabled"):
+            self.api.rich_ui_enabled = bool(getattr(config, "rich_ui_enabled", True))
+
     def _owner_home_keyboard(self) -> dict:
         return inline_keyboard([
-            [("⚙️ پنل مالک", "settings"), ("🔄 Software Update", "software_update")],
+            [("⚙️ پنل مالک", "settings"), ("🔄 به‌روزرسانی", "software_update")],
             [("🧯 خطاهای اخیر", "recent_errors")],
         ])
 
     def _handle_command(self, chat_id: int, user_id: int, is_private: bool, text: str) -> None:
         command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
         if command == "/start" and user_id == self.owner_id and is_private:
-            self.api.send_message(
-                chat_id,
-                "🦷 <b>DrJavanBot</b>\nسؤال را بفرستید؛ پاسخ فقط بر پایه آرشیو گروه تولید می‌شود.\n\nمالک شناسایی شد؛ پنل مدیریت از دکمه زیر در دسترس است.",
-                reply_markup=self._owner_home_keyboard(),
+            screen = RichScreen(
+                rich_html=(
+                    "<h3>🦷 DrJavanBot</h3>"
+                    "<p>پاسخ‌ها فقط از پیام‌های آرشیو گروه ساخته می‌شوند.</p>"
+                    "<blockquote>مالک شناسایی شد. تنظیمات، سلامت سیستم و به‌روزرسانی امن از پنل زیر در دسترس است.</blockquote>"
+                    "<footer>مدل AI منبع پاسخ نیست؛ فقط برای جست‌وجو و خلاصه‌سازی شواهد گروه استفاده می‌شود.</footer>"
+                ),
+                fallback_html=(
+                    "🦷 <b>DrJavanBot</b>\n"
+                    "پاسخ‌ها فقط از پیام‌های آرشیو گروه ساخته می‌شوند.\n\n"
+                    "مالک شناسایی شد؛ پنل مدیریت از دکمه‌های زیر در دسترس است."
+                ),
+                screen_id="owner_home",
             )
-            # Explicit /start always refreshes the GitHub version check. Failure
-            # is best-effort and never blocks the owner panel.
+            self.api.send_message(chat_id, rich_text(screen), reply_markup=self._owner_home_keyboard())
             self.notify_update_if_available(force=True)
             return
         if command in {"/panel", "/settings"}:
@@ -82,15 +96,27 @@ class TelegramBotApp(CoreTelegramBotApp):
                 claim(latest)
             except Exception:
                 pass
-        text = (
+        fallback = (
             "🆕 <b>نسخه جدید DrJavanBot موجود است</b>\n"
-            f"Current: <code>{html_escape(current[:12] if current else 'unknown')}</code>\n"
-            f"Latest: <code>{html_escape(latest[:12])}</code>\n\n"
-            "نصب خودکار و بدون تأیید انجام نمی‌شود؛ با دکمه زیر candidate ابتدا کامل تست می‌شود."
+            f"نسخه فعلی: <code>{html_escape(current[:12] if current else 'unknown')}</code>\n"
+            f"آخرین main: <code>{html_escape(latest[:12])}</code>\n\n"
+            "نصب بدون تأیید انجام نمی‌شود؛ candidate ابتدا کامل تست می‌شود."
+        )
+        screen = RichScreen(
+            rich_html=(
+                "<h3>🆕 نسخه جدید DrJavanBot</h3>"
+                "<ul>"
+                f"<li>نسخه فعلی: {html_escape(current[:12] if current else 'unknown')}</li>"
+                f"<li>آخرین main: {html_escape(latest[:12])}</li>"
+                "</ul>"
+                "<blockquote>نصب خودکار انجام نمی‌شود. با تأیید شما، candidate ابتدا تست و staging می‌شود و فقط در صورت موفقیت جایگزین نسخه فعال خواهد شد.</blockquote>"
+            ),
+            fallback_html=fallback,
+            screen_id="update_available",
         )
         self.api.send_message(
             self.owner_id,
-            text,
+            rich_text(screen),
             reply_markup=inline_keyboard([
                 [("🧪 تست و نصب", "software_update_confirm")],
                 [("📋 وضعیت آپدیتر", "software_update")],
@@ -131,26 +157,26 @@ class TelegramBotApp(CoreTelegramBotApp):
             try:
                 request_id = self.services.request_software_update()
                 text = (
-                    "✅ درخواست آپدیت ثبت شد.\n"
-                    f"Request: <code>{html_escape(request_id)}</code>\n"
-                    "Updater candidate را در کنار نسخه فعال می‌سازد و تا پایان تست و index، ربات فعلی روشن می‌ماند."
+                    "✅ <b>درخواست به‌روزرسانی ثبت شد</b>\n"
+                    f"Request: <code>{html_escape(request_id)}</code>\n\n"
+                    "candidate در کنار نسخه فعال ساخته و تست می‌شود؛ تا مرحله switch ربات فعلی روشن می‌ماند."
                 )
             except RuntimeError:
-                text = "⏳ یک درخواست آپدیت/rollback فعال است. وضعیت را باز کنید؛ درخواست stale پس از timeout قابل جایگزینی است."
+                text = "⏳ یک درخواست به‌روزرسانی/rollback فعال است. وضعیت را باز کنید؛ درخواست stale پس از timeout قابل جایگزینی است."
             self.api.edit_message_text(
                 chat_id,
                 message_id,
                 text,
-                reply_markup=inline_keyboard([[("وضعیت", "software_update")]]),
+                reply_markup=inline_keyboard([[("📋 وضعیت", "software_update")]]),
             )
             return
         if data == "software_rollback":
             self.api.edit_message_text(
                 chat_id,
                 message_id,
-                "↩️ بازگشت به آخرین release سالم قبلی؟",
+                "↩️ <b>بازگشت نسخه</b>\nبه آخرین release سالم قبلی برگردیم؟",
                 reply_markup=inline_keyboard([
-                    [("✅ Rollback", "software_rollback_confirm")],
+                    [("✅ تأیید Rollback", "software_rollback_confirm")],
                     [("انصراف", "software_update")],
                 ]),
             )
@@ -160,34 +186,49 @@ class TelegramBotApp(CoreTelegramBotApp):
                 request_id = self.services.request_rollback()
                 text = "✅ درخواست rollback ثبت شد.\nRequest: <code>%s</code>" % html_escape(request_id)
             except RuntimeError:
-                text = "⏳ یک درخواست آپدیت/rollback از قبل فعال است."
+                text = "⏳ یک درخواست به‌روزرسانی/rollback از قبل فعال است."
             self.api.edit_message_text(
                 chat_id,
                 message_id,
                 text,
-                reply_markup=inline_keyboard([[("وضعیت", "software_update")]]),
+                reply_markup=inline_keyboard([[("📋 وضعیت", "software_update")]]),
             )
 
     def _show_settings(self, chat_id: int, message_id: int | None = None) -> None:
-        status = "✅ تنظیم شده" if self.services.ai_configured() else "❌ تنظیم نشده"
-        text = (
-            "<b>تنظیمات مالک</b>\n"
+        ai_ok = self.services.ai_configured()
+        status = "تنظیم شده ✅" if ai_ok else "تنظیم نشده ❌"
+        model = html_escape(self.services.model())
+        access = html_escape(self.state.access_mode())
+        fallback = (
+            "⚙️ <b>پنل مالک</b>\n\n"
             f"AvalAI: {status}\n"
-            f"Model: <code>{html_escape(self.services.model())}</code>\n"
-            f"Access: <code>{self.state.access_mode()}</code>"
+            f"مدل: <code>{model}</code>\n"
+            f"دسترسی: <code>{access}</code>\n\n"
+            "پاسخ کاربران فقط از شواهد آرشیو گروه ساخته می‌شود."
+        )
+        screen = RichScreen(
+            rich_html=(
+                "<h3>⚙️ پنل مالک</h3>"
+                "<ul>"
+                f"<li>AvalAI: {status}</li>"
+                f"<li>مدل: {model}</li>"
+                f"<li>دسترسی: {access}</li>"
+                f"<li>Rich UI: {'فعال' if getattr(self.config, 'rich_ui_enabled', True) else 'غیرفعال'}</li>"
+                "</ul>"
+                "<blockquote>AI فقط برنامه‌ریزی جست‌وجو و خلاصه‌سازی شواهد را انجام می‌دهد؛ پاسخ بدون support معتبر از پیام‌های گروه پذیرفته نمی‌شود.</blockquote>"
+            ),
+            fallback_html=fallback,
+            screen_id="owner_settings",
         )
         kb = inline_keyboard([
-            [("🔑 تنظیم/تعویض API Key", "setkey"), ("🧪 تست AvalAI", "testai")],
-            [("🗑 حذف API Key", "remove_key"), ("🤖 مدل", "models")],
-            [("📊 آمار", "stats"), ("❤️ Health", "health")],
-            [("🗂 Reindex", "reindex"), ("📚 Index", "indexstats")],
-            [("🧹 Cache", "cache"), ("👥 دسترسی/Rate", "access")],
-            [("🧯 خطاهای اخیر", "recent_errors"), ("🔄 Software Update", "software_update")],
+            [("🔑 API Key", "setkey"), ("🧪 تست AvalAI", "testai")],
+            [("🗑 حذف Key", "remove_key"), ("🤖 مدل", "models")],
+            [("📊 آمار", "stats"), ("❤️ سلامت", "health")],
+            [("🗂 بازسازی ایندکس", "reindex"), ("📚 وضعیت ایندکس", "indexstats")],
+            [("🧹 Cache", "cache"), ("👥 دسترسی / Rate", "access")],
+            [("🧯 خطاهای اخیر", "recent_errors"), ("🔄 به‌روزرسانی", "software_update")],
         ])
-        if message_id is None:
-            self.api.send_message(chat_id, text, reply_markup=kb)
-        else:
-            self.api.edit_message_text(chat_id, message_id, text, reply_markup=kb)
+        self._send_or_edit_screen(chat_id, message_id, screen, kb)
 
     def _show_recent_errors(self, chat_id: int, message_id: int | None = None) -> None:
         rows = []
@@ -199,52 +240,97 @@ class TelegramBotApp(CoreTelegramBotApp):
                 ).fetchall()
         except (sqlite3.Error, OSError):
             rows = []
-        lines = ["<b>خطاهای اخیر</b>"]
+        fallback_lines = ["🧯 <b>خطاهای اخیر</b>"]
+        rich = ["<h3>🧯 خطاهای اخیر</h3>"]
         if not rows:
-            lines.append("خطای ثبت‌شده‌ای وجود ندارد.")
+            fallback_lines.append("خطای ثبت‌شده‌ای وجود ندارد.")
+            rich.append("<p>خطای ثبت‌شده‌ای وجود ندارد.</p>")
         else:
+            rich.append("<ul>")
             for error_id, created_at, error_class in rows:
                 try:
                     stamp = datetime.fromtimestamp(float(created_at), timezone.utc).isoformat(timespec="seconds")
                 except (TypeError, ValueError, OSError):
                     stamp = "زمان نامشخص"
-                lines.append(
-                    f"<code>Q{int(error_id)}</code> — <code>{html_escape(error_class)}</code> — {html_escape(stamp)}"
-                )
-            lines.append("\nبرای دیباگ فقط Error ID و Class را بفرست؛ متن سؤال یا secret اینجا ذخیره/نمایش داده نمی‌شود.")
-        kb = inline_keyboard([[("🔄 تازه‌سازی", "recent_errors")], [("بازگشت", "settings")]])
-        text = "\n".join(lines)
-        if message_id is None:
-            self.api.send_message(chat_id, text, reply_markup=kb)
-        else:
-            self.api.edit_message_text(chat_id, message_id, text, reply_markup=kb)
+                item = f"Q{int(error_id)} — {html_escape(error_class)} — {html_escape(stamp)}"
+                fallback_lines.append(item)
+                rich.append(f"<li>{item}</li>")
+            rich.append("</ul>")
+            note = "برای دیباگ فقط Error ID و Class را بفرست؛ متن سؤال یا secret اینجا ذخیره/نمایش داده نمی‌شود."
+            fallback_lines.extend(("", note))
+            rich.append(f"<footer>{note}</footer>")
+        screen = RichScreen("".join(rich), "\n".join(fallback_lines), "recent_errors")
+        kb = inline_keyboard([[("🔄 تازه‌سازی", "recent_errors")], [("⬅️ پنل", "settings")]])
+        self._send_or_edit_screen(chat_id, message_id, screen, kb)
 
     def _show_update(self, chat_id: int, message_id: int | None = None) -> None:
         status = self.services.update_status()
-        lines = ["<b>Software Update</b>", f"State: <code>{html_escape(status.state)}</code>"]
-        if status.request_id:
-            lines.append(f"Request: <code>{html_escape(status.request_id)}</code>")
-        if status.action:
-            lines.append(f"Action: <code>{html_escape(status.action)}</code>")
-        if status.current_sha:
-            lines.append(f"Current: <code>{html_escape(status.current_sha[:12])}</code>")
-        if status.target_sha:
-            lines.append(f"Target: <code>{html_escape(status.target_sha[:12])}</code>")
-        if status.message:
-            lines.append(html_escape(status.message))
-        if status.updated_at:
-            lines.append(f"Updated: {html_escape(status.updated_at)}")
+        state = str(status.state or "unknown")
+        icon = {
+            "idle": "🟢",
+            "success": "✅",
+            "pending": "🟡",
+            "queued": "🟡",
+            "running": "🔵",
+            "stalled": "🟠",
+            "failed": "🔴",
+        }.get(state.casefold(), "⚪️")
+        state_label = {
+            "idle": "آماده",
+            "success": "موفق",
+            "pending": "در صف",
+            "queued": "در صف",
+            "running": "در حال اجرا",
+            "stalled": "بدون heartbeat / نیازمند بررسی",
+            "failed": "ناموفق",
+        }.get(state.casefold(), state)
+
+        current = html_escape(status.current_sha[:12]) if status.current_sha else "—"
+        target = html_escape(status.target_sha[:12]) if status.target_sha else "—"
+        action = html_escape(status.action or "—")
+        request = html_escape(status.request_id or "—")
+        message = html_escape(status.message or "پیامی ثبت نشده است.")
+        updated = html_escape(status.updated_at or "—")
+        fallback = (
+            "🔄 <b>به‌روزرسانی DrJavanBot</b>\n\n"
+            f"وضعیت: {icon} {html_escape(state_label)}\n"
+            f"نسخه فعلی: <code>{current}</code>\n"
+            f"نسخه هدف: <code>{target}</code>\n"
+            f"عملیات: <code>{action}</code>\n"
+            f"Request: <code>{request}</code>\n\n"
+            f"{message}\n"
+            f"آخرین بروزرسانی وضعیت: {updated}"
+        )
+        screen = RichScreen(
+            rich_html=(
+                "<h3>🔄 به‌روزرسانی DrJavanBot</h3>"
+                "<ul>"
+                f"<li>وضعیت: {icon} {html_escape(state_label)}</li>"
+                f"<li>نسخه فعلی: {current}</li>"
+                f"<li>نسخه هدف: {target}</li>"
+                f"<li>عملیات: {action}</li>"
+                f"<li>Request: {request}</li>"
+                "</ul>"
+                f"<blockquote>{message}</blockquote>"
+                f"<footer>آخرین بروزرسانی وضعیت: {updated}</footer>"
+            ),
+            fallback_html=fallback,
+            screen_id="software_update",
+        )
         kb = inline_keyboard([
             [("🧪 تست و نصب آخرین main", "software_update_confirm")],
-            [("↩️ Rollback", "software_rollback")],
+            [("↩️ بازگشت نسخه", "software_rollback")],
             [("🔄 تازه‌سازی وضعیت", "software_update")],
-            [("بازگشت", "settings")],
+            [("⬅️ پنل مالک", "settings")],
         ])
-        text = "\n".join(lines)
+        self._send_or_edit_screen(chat_id, message_id, screen, kb)
+
+    def _send_or_edit_screen(self, chat_id: int, message_id: int | None, screen: RichScreen, keyboard: dict | None) -> None:
+        content = rich_text(screen)
         if message_id is None:
-            self.api.send_message(chat_id, text, reply_markup=kb)
+            self.api.send_message(chat_id, content, reply_markup=keyboard)
         else:
-            self.api.edit_message_text(chat_id, message_id, text, reply_markup=kb)
+            self.api.edit_message_text(chat_id, message_id, content, reply_markup=keyboard)
 
     def _help_text(self, user_id: int) -> str:
         text = super()._help_text(user_id)
@@ -252,7 +338,7 @@ class TelegramBotApp(CoreTelegramBotApp):
             if "/panel" not in text:
                 text += "\n/panel — پنل مالک"
             if "/update" not in text:
-                text += "\n/update — آپدیت امن نرم‌افزار"
+                text += "\n/update — به‌روزرسانی امن نرم‌افزار"
             if "/errors" not in text:
                 text += "\n/errors — خطاهای اخیر بدون جزئیات حساس"
         return text
