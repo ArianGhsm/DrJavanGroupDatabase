@@ -23,10 +23,11 @@ class SemanticEvalCase:
     plan: SearchPlan
     anchors: tuple[str, ...]
     expectation: Expectation = "observe"
-    # Every group must occur somewhere in the top candidates OR their hydrated
-    # context for a strict present case. This prevents a broad topic hit from
-    # making a faceted question look healthy when the requested facet is absent.
+    # A strict faceted case must not pass merely because the topic is in one
+    # result and a generic age/number word exists somewhere else in top-k. Every
+    # required group must be present inside the SAME hydrated discussion bundle.
     required_anchor_groups: tuple[tuple[str, ...], ...] = ()
+    min_relevant_top_k: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,8 @@ class SemanticCaseReport:
     context_only_relevant_hits: int
     required_anchor_groups_hit: int
     required_anchor_groups_total: int
+    max_colocated_required_groups: int
+    colocated_required_groups_complete: bool
     independent_authors_top_k: int
     top_score: float | None
     gate_passed: bool
@@ -108,8 +111,8 @@ def default_semantic_cases() -> tuple[SemanticEvalCase, ...]:
                     SearchFamily("population", ("کودک", "بچه", "اطفال", "pediatric")),
                     SearchFamily("timing", ("سن", "سالگی", "زمان شروع", "age")),
                     SearchFamily("topic_timing", ("سن ارتودنسی", "شروع ارتودنسی", "ارتودنسی کودک")),
-                    # Search hints only: these may locate differently-worded
-                    # discussions but are not accepted as answer facts.
+                    # Search-only domain hints. They can locate a differently
+                    # worded discussion but never become answer facts by themselves.
                     SearchFamily("domain_stage", ("دندان مختلط", "mixed dentition", "interceptive orthodontics", "فاز اول")),
                 ),
                 entity_types=("procedure",),
@@ -120,6 +123,7 @@ def default_semantic_cases() -> tuple[SemanticEvalCase, ...]:
                 ("ارتودنسی", "orthodont", "ortho"),
                 ("سن", "سالگی", "سال", "age", "year"),
             ),
+            min_relevant_top_k=4,
             expectation="present",
         ),
         SemanticEvalCase(
@@ -256,12 +260,18 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
     top = candidates[:top_k]
 
     anchors = tuple(normalize_text(anchor) for anchor in case.anchors if normalize_text(anchor))
+    required_groups = tuple(
+        tuple(normalize_text(anchor) for anchor in group if normalize_text(anchor))
+        for group in case.required_anchor_groups
+    )
     relevant = 0
     context_only = 0
     combined_texts: list[str] = []
+    max_colocated_groups = 0
     for candidate in top:
         direct = normalize_text(candidate.message.text_normalized or candidate.message.text_raw)
         context = " ".join(normalize_text(item.text_normalized or item.text_raw) for item in candidate.context)
+        bundle = " ".join((direct, context))
         combined_texts.extend((direct, context))
         direct_hit = any(anchor in direct for anchor in anchors)
         context_hit = any(anchor in context for anchor in anchors)
@@ -269,13 +279,19 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
             relevant += 1
         if not direct_hit and context_hit:
             context_only += 1
+        if required_groups:
+            bundle_groups = sum(
+                1 for group in required_groups
+                if group and any(anchor in bundle for anchor in group)
+            )
+            max_colocated_groups = max(max_colocated_groups, bundle_groups)
 
     corpus_view = " ".join(combined_texts)
-    required_groups = tuple(
-        tuple(normalize_text(anchor) for anchor in group if normalize_text(anchor))
-        for group in case.required_anchor_groups
+    groups_hit = sum(
+        1 for group in required_groups
+        if group and any(anchor in corpus_view for anchor in group)
     )
-    groups_hit = sum(1 for group in required_groups if group and any(anchor in corpus_view for anchor in group))
+    colocated_complete = bool(required_groups) and max_colocated_groups == len(required_groups)
 
     relevance_proxy = (relevant / len(top)) if top and anchors else None
     irrelevant_proxy = (1.0 - relevance_proxy) if relevance_proxy is not None else None
@@ -303,6 +319,7 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
         relevant_top_k=relevant,
         required_groups_hit=groups_hit,
         required_groups_total=len(required_groups),
+        max_colocated_required_groups=max_colocated_groups,
     )
     return SemanticCaseReport(
         name=case.name,
@@ -325,6 +342,8 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
         context_only_relevant_hits=context_only,
         required_anchor_groups_hit=groups_hit,
         required_anchor_groups_total=len(required_groups),
+        max_colocated_required_groups=max_colocated_groups,
+        colocated_required_groups_complete=colocated_complete,
         independent_authors_top_k=len(authors),
         top_score=round(top[0].local_score, 6) if top else None,
         gate_passed=gate_passed,
@@ -339,17 +358,23 @@ def _gate(
     relevant_top_k: int,
     required_groups_hit: int,
     required_groups_total: int,
+    max_colocated_required_groups: int,
 ) -> tuple[bool, str]:
     if case.expectation == "absent":
         return (result_count == 0, "expected no retrieval candidates")
     if case.expectation == "present":
         if result_count == 0:
             return False, "expected archive candidates but none were retrieved"
-        if case.anchors and relevant_top_k == 0:
-            return False, "retrieved candidates lacked topic anchors even after context expansion"
+        if case.anchors and relevant_top_k < max(1, case.min_relevant_top_k):
+            return False, f"topical retrieval too weak ({relevant_top_k}/{case.min_relevant_top_k})"
         if required_groups_total and required_groups_hit < required_groups_total:
-            return False, f"required answer facets missing ({required_groups_hit}/{required_groups_total})"
-        return True, "expected archive topic and required facets retrieved"
+            return False, f"required answer facets missing globally ({required_groups_hit}/{required_groups_total})"
+        if required_groups_total and max_colocated_required_groups < required_groups_total:
+            return False, (
+                "required answer facets were not found in one discussion bundle "
+                f"({max_colocated_required_groups}/{required_groups_total})"
+            )
+        return True, "expected archive topic and colocated required facets retrieved"
     return True, "observational metric only"
 
 
