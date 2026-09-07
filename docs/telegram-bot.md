@@ -12,6 +12,21 @@ Where supported by the active Telegram Bot API, presentation uses Rich Messages 
 
 Long answers retain the safe legacy chunk limit rather than sending oversized Rich payloads.
 
+## Live question progress
+
+A normal archive question no longer leaves the chat visually idle while planner/search/model calls are running. Production uses one transient, editable status message plus Telegram `typing` actions. The status follows real pipeline milestones:
+
+1. فهم سؤال؛
+2. جست‌وجوی آرشیو؛
+3. بررسی گفت‌وگوهای مرتبط؛
+4. جمع‌بندی و اعتبارسنجی شواهد.
+
+The progress message may show bounded operational counts such as query-family count, number of retrieved candidates/authors, number of discussion windows opened, and evidence messages/authors admitted to synthesis. It can also report that a bounded refinement or structured-output repair is occurring.
+
+This UI is **not** a chain-of-thought channel. Hidden model reasoning, prompts, private analysis, speculative brand names and unvalidated archive excerpts are never sent as progress. Before final validation the bot exposes only stage names and safe counts. Exact archive text becomes user-visible only as validated support quotes in the final grounded answer/source UI.
+
+Progress delivery is fail-soft and presentation-only: a failed status edit or typing action cannot fail, repeat or restart retrieval/AI work. The transient status is removed after the final answer or error is visible. `DRJAVAN_TG_PROGRESS_UI_ENABLED=false` returns to the older one-shot question presentation without changing retrieval/grounding semantics.
+
 ## Runtime secrets
 
 `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OWNER_ID` are supplied only by the server environment. `TELEGRAM_OWNER_ID` is a positive numeric Telegram user id; username/display name is never authorization.
@@ -78,7 +93,8 @@ The runtime uses Telegram Bot API long polling through Python standard-library H
 - invalid or unsupported synthesis claims: rejected by archive grounding validation;
 - insufficient archive evidence: deterministic group-not-found answer;
 - missing/busy index: bot remains up and reports index-not-ready;
-- Rich Message presentation failure: fallback to already-computed legacy HTML only.
+- Rich Message presentation failure: fallback to already-computed legacy HTML only;
+- progress-message failure: ignored without repeating or cancelling the underlying question job.
 
 ## Runtime files
 
