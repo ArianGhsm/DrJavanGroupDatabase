@@ -7,7 +7,7 @@ import threading
 from drjavanbot.ai.config import AIConfig
 from drjavanbot.config import Settings
 from .api import TelegramAPI, TelegramAPIError, TelegramNetworkError
-from .app_v2 import TelegramBotApp
+from .app_v3 import TelegramBotApp
 from .config import TelegramConfig
 from .services import RuntimeServices
 from .state import BotStateStore
