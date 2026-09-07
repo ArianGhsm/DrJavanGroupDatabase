@@ -43,4 +43,6 @@ class TelegramAPI:
     def delete_message(self,chat_id,message_id): return bool(self.call("deleteMessage",chat_id=chat_id,message_id=message_id))
     def send_chat_action(self,chat_id,action="typing"): self.call("sendChatAction",chat_id=chat_id,action=action)
     def get_me(self): return dict(self.call("getMe") or {})
+    def set_my_commands(self,commands,*,scope=None,language_code=None):
+        return bool(self.call("setMyCommands",commands=list(commands),scope=scope,language_code=language_code))
     def __repr__(self): return "TelegramAPI(token=<redacted>)"
