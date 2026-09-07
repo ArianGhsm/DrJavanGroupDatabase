@@ -16,6 +16,7 @@ class RetrievalReport:
     query_runs: int
     families_with_hits: int
     duplicate_queries_skipped: int = 0
+    context_hydrated: int = 0
 
 
 def retrieve_with_plan(
@@ -25,20 +26,25 @@ def retrieve_with_plan(
     candidate_limit: int = 96,
     evidence_limit: int = 36,
 ) -> RetrievalReport:
-    """Run independent semantic query families and fuse them deterministically.
+    """Run independent lexical families, fuse winners, then hydrate context.
 
-    The planner proposes what to look for; the local archive remains the only
-    source of evidence. No planner string can become evidence on its own.
+    Search-plan hints determine *where to look* but never become evidence. Query
+    de-duplication occurs after low-information filtering so semantically identical
+    lexical queries cannot fake family coverage.
 
-    Query de-duplication happens *after* deterministic low-information filtering.
-    This matters because planner queries such as ``کامپوزیت`` and ``کامپوزیت خوب``
-    can collapse to the same lexical query. Counting both as independent families
-    would create false coverage and could incorrectly suppress adaptive refinement.
+    Context is deliberately deferred until after fusion. The previous design
+    expanded reply/neighborhood context for up to 24 candidates in every query
+    family and then discarded most of that work during fusion. On the production
+    249k-message archive this produced multi-second amplification. The optimized
+    path retrieves cheap primary candidates first, fuses/diversifies them, and
+    hydrates context only for the bounded fused winners.
     """
-    runs: list[tuple[str, tuple[EvidenceCandidate, ...]]] = []
-    hit_families: set[str] = set()
+    prepared: list[tuple[str, SearchQuery]] = []
     seen_queries: set[str] = set()
     duplicate_queries_skipped = 0
+    per_family_evidence_limit = max(8, min(20, evidence_limit))
+    bounded_candidate_limit = max(20, min(candidate_limit, 140))
+
     for family_name, raw_query in plan.queries:
         query_text = informative_query(raw_query)
         query_key = normalize_text(query_text)
@@ -48,26 +54,54 @@ def retrieve_with_plan(
             duplicate_queries_skipped += 1
             continue
         seen_queries.add(query_key)
-        result = tuple(
-            backend.search(
-                SearchQuery(
-                    raw_query=query_text,
-                    candidate_limit=max(20, min(candidate_limit, 160)),
-                    evidence_limit=max(8, min(24, evidence_limit)),
-                    reply_depth=4 if plan.reply_context else 1,
-                    context_before=None if plan.reply_context else 0,
-                    context_after=None if plan.reply_context else 0,
-                )
-            )
-        )
+        prepared.append((
+            family_name,
+            SearchQuery(
+                raw_query=query_text,
+                candidate_limit=bounded_candidate_limit,
+                evidence_limit=per_family_evidence_limit,
+                reply_depth=4 if plan.reply_context else 1,
+                context_before=None if plan.reply_context else 0,
+                context_after=None if plan.reply_context else 0,
+                include_context=False,
+            ),
+        ))
+
+    if not prepared:
+        return RetrievalReport((), 0, 0, duplicate_queries_skipped, 0)
+
+    queries = tuple(query for _, query in prepared)
+    batch_search = getattr(backend, "search_many", None)
+    if callable(batch_search):
+        result_sets = tuple(tuple(values) for values in batch_search(queries))
+        if len(result_sets) != len(queries):
+            # Capability implementations must preserve positional correspondence.
+            # Fall back safely rather than silently mis-assigning query families.
+            result_sets = tuple(tuple(backend.search(query)) for query in queries)
+    else:
+        result_sets = tuple(tuple(backend.search(query)) for query in queries)
+
+    runs: list[tuple[str, tuple[EvidenceCandidate, ...]]] = []
+    hit_families: set[str] = set()
+    for (family_name, _), result in zip(prepared, result_sets):
         runs.append((family_name, result))
         if result:
             hit_families.add(family_name)
+
+    fused = _fuse_runs(runs, limit=evidence_limit)
+    hydrated, hydrated_count = _hydrate_context_after_fusion(
+        backend,
+        fused,
+        reply_context=plan.reply_context,
+        reply_depth=4,
+        limit=min(max(8, evidence_limit), 24),
+    )
     return RetrievalReport(
-        candidates=_fuse_runs(runs, limit=evidence_limit),
+        candidates=hydrated,
         query_runs=len(runs),
         families_with_hits=len(hit_families),
         duplicate_queries_skipped=duplicate_queries_skipped,
+        context_hydrated=hydrated_count,
     )
 
 
@@ -96,6 +130,53 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
     if candidates[0].local_score >= 7.0 and len(authors) >= 2 and strong_reasons >= 2:
         return False, "strong_topical_match"
     return True, "coverage_or_diversity_weak"
+
+
+def _hydrate_context_after_fusion(
+    backend: SearchBackend,
+    candidates: Sequence[EvidenceCandidate],
+    *,
+    reply_context: bool,
+    reply_depth: int,
+    limit: int,
+) -> tuple[tuple[EvidenceCandidate, ...], int]:
+    values = tuple(candidates)
+    if not values or not reply_context:
+        return values, 0
+
+    bounded_limit = min(max(0, int(limit)), len(values))
+    hydrate_many = getattr(backend, "hydrate_context", None)
+    if callable(hydrate_many):
+        hydrated = tuple(hydrate_many(values, reply_depth=reply_depth, limit=bounded_limit))
+        if len(hydrated) == len(values):
+            count = sum(1 for before, after in zip(values[:bounded_limit], hydrated[:bounded_limit]) if after.context and not before.context)
+            return hydrated, count
+
+    # Protocol-compatible fallback for custom/test backends. Existing context is
+    # never replaced; only empty fused winners are hydrated.
+    output: list[EvidenceCandidate] = []
+    count = 0
+    for index, candidate in enumerate(values):
+        if index >= bounded_limit or candidate.context:
+            output.append(candidate)
+            continue
+        try:
+            context = tuple(backend.get_context(candidate.message, before=1, after=2, follow_reply=True))
+        except Exception:
+            context = ()
+        if context:
+            count += 1
+            reasons = set(candidate.match_reasons)
+            reasons.add("context_available")
+            output.append(replace(
+                candidate,
+                local_score=round(candidate.local_score + 0.20, 6),
+                match_reasons=tuple(sorted(reasons)),
+                context=context,
+            ))
+        else:
+            output.append(candidate)
+    return tuple(output), count
 
 
 def _fuse_runs(
