@@ -34,6 +34,8 @@ class SemanticCaseReport:
     query_runs: int
     duplicate_queries_skipped: int
     families_with_hits: int
+    context_hydrated: int
+    discussion_windows: int
     results: int
     top_k: int
     proxy_relevant_top_k: int
@@ -263,6 +265,8 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
         query_runs=retrieval.query_runs,
         duplicate_queries_skipped=retrieval.duplicate_queries_skipped,
         families_with_hits=retrieval.families_with_hits,
+        context_hydrated=retrieval.context_hydrated,
+        discussion_windows=retrieval.discussion_windows,
         results=len(candidates),
         top_k=len(top),
         proxy_relevant_top_k=relevant,
