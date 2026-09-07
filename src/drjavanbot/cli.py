@@ -10,6 +10,7 @@ from drjavanbot.benchmark import benchmark_archive
 from drjavanbot.config import Settings
 from drjavanbot.health import local_index_health
 from drjavanbot.search import SQLiteSearchBackend, SearchQuery
+from drjavanbot.semantic_benchmark import semantic_benchmark_archive
 from drjavanbot.storage import full_reindex, incremental_index
 
 
@@ -34,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     bench = sub.add_parser("benchmark", help="Build an isolated temporary index and benchmark retrieval")
     bench.add_argument("queries", nargs="*", default=["RCT", "ایمپلنت", "e max"])
+
+    semantic = sub.add_parser(
+        "semantic-benchmark",
+        help="Run deterministic semantic-retrieval regression metrics against the complete archive",
+    )
+    semantic.add_argument("--top-k", type=int, default=12)
+    semantic.add_argument(
+        "--strict",
+        action="store_true",
+        help="Return non-zero when stable present/absent retrieval gates fail",
+    )
     return parser
 
 
@@ -70,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "benchmark":
         print(json.dumps(benchmark_archive(archive_dir, tuple(args.queries)).as_dict(), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "semantic-benchmark":
+        report = semantic_benchmark_archive(archive_dir, top_k=args.top_k)
+        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+        return 0 if (not args.strict or report.passed) else 1
     return 2
 
 
