@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
-from typing import Callable, Protocol
+from typing import Callable, Protocol, Sequence
 
 from drjavanbot.normalization import normalize_text
 from drjavanbot.search import SearchBackend
@@ -40,11 +40,11 @@ from .retrieval import assess_planned_retrieval, retrieve_with_plan
 from .telemetry import TelemetryStore
 from .validation import CitationValidationError, ModelOutputError, parse_json_object, validate_answer_payload
 
-# Planner + answerability/refinement + synthesis + one structured repair. This is
-# a hard application-level ceiling, not an invitation to loop. The previous cap
-# of three forced faceted questions to choose between better retrieval and a
-# safe synthesis repair; four preserves both while remaining tightly bounded.
 MAX_LOGICAL_AI_CALLS = 4
+_MIN_PLANNER_OUTPUT_TOKENS = 480
+_MIN_REFINEMENT_OUTPUT_TOKENS = 360
+_MAX_RETRIEVAL_PREVIEW_MESSAGES = 14
+_MAX_RETRIEVAL_PREVIEW_CHARS = 700
 ProgressCallback = Callable[[str, dict[str, object]], None]
 
 
@@ -57,7 +57,7 @@ class AIProvider(Protocol):
 
 
 class ArchiveAnswerService:
-    """AI planning -> faceted local retrieval -> bounded rescue -> grounded synthesis."""
+    """AI planning -> faceted local retrieval -> bounded AI rescue -> grounded synthesis."""
 
     def __init__(
         self,
@@ -79,14 +79,7 @@ class ArchiveAnswerService:
         self.telemetry = telemetry
 
     def answer(self, question: str, progress: ProgressCallback | None = None) -> AnswerResult:
-        """Answer from archive evidence while emitting only safe pipeline milestones.
-
-        ``progress`` is intentionally *not* a reasoning/chain-of-thought channel.
-        Events contain stage names and bounded operational counts only: number of
-        search families, retrieved messages, authors, bridged discussion windows
-        and evidence items. Prompts, model reasoning, hidden analysis and
-        unvalidated archive text are never emitted through this callback.
-        """
+        """Answer from archive evidence while emitting only safe pipeline milestones."""
         question = question.strip()
         normalized = normalize_text(question)
         if not normalized:
@@ -124,7 +117,7 @@ class ArchiveAnswerService:
                     api_key=api_key,
                     system_prompt=SEARCH_PLANNER_SYSTEM_PROMPT,
                     user_prompt=search_planner_user_prompt(question),
-                    max_output_tokens=self.config.planner_max_output_tokens,
+                    max_output_tokens=max(self.config.planner_max_output_tokens, _MIN_PLANNER_OUTPUT_TOKENS),
                     processor=lambda content: parse_search_plan(content, question=question),
                 )
                 plan = parsed
@@ -154,10 +147,9 @@ class ArchiveAnswerService:
         _emit_retrieval_progress(progress, report, refined=False)
         needs_refinement, retrieval_reason = assess_planned_retrieval(report)
 
-        # A superficially strong topic match is not enough for a faceted question.
-        # E.g. many generic orthodontic posts do not prove we found the discussion
-        # that answers "at what age for children?". Such questions always get one
-        # bounded answerability/rescue pass, even when lexical scores look strong.
+        # A strong topical hit is not equivalent to answering a requested facet.
+        # Timing, comparison, recommendation, cause, method and quantity questions
+        # receive one bounded rescue pass even when lexical scores look healthy.
         if plan_requires_deep_retrieval(plan):
             needs_refinement = True
             retrieval_reason = f"answer_facet_check:{retrieval_reason}"
@@ -173,6 +165,7 @@ class ArchiveAnswerService:
             observed = observed_vocabulary(report.candidates, question=question)
             corpus_hints = _corpus_hints(self.backend, plan, observed)
             diagnostics = _retrieval_diagnostics(report, retrieval_reason)
+            preview = _retrieval_preview(question, report.candidates, self.config)
             ai_calls += 1
             try:
                 _, families = self._call_processed(
@@ -185,8 +178,9 @@ class ArchiveAnswerService:
                         observed,
                         corpus_hints,
                         retrieval_diagnostics=diagnostics,
+                        retrieval_preview=preview,
                     ),
-                    max_output_tokens=self.config.refinement_max_output_tokens,
+                    max_output_tokens=max(self.config.refinement_max_output_tokens, _MIN_REFINEMENT_OUTPUT_TOKENS),
                     processor=parse_refinement_families,
                 )
             except (ModelOutputError, CitationValidationError):
@@ -338,6 +332,25 @@ class ArchiveAnswerService:
                 usage=result.usage,
             )
         return result, processed
+
+
+def _retrieval_preview(question: str, candidates: Sequence, config: AIConfig) -> tuple[dict[str, object], ...]:
+    """PII-redacted, bounded real archive text for the retrieval critic only."""
+    if not candidates:
+        return ()
+    pack = build_evidence_pack(question, tuple(candidates)[:20], config)
+    preview: list[dict[str, object]] = []
+    for item in pack.messages[:_MAX_RETRIEVAL_PREVIEW_MESSAGES]:
+        text = (item.text or "").strip()
+        if len(text) > _MAX_RETRIEVAL_PREVIEW_CHARS:
+            half = (_MAX_RETRIEVAL_PREVIEW_CHARS - 3) // 2
+            text = text[:half].rstrip() + " … " + text[-half:].lstrip()
+        preview.append({
+            "message_id": item.message_id,
+            "role": item.role,
+            "text": text,
+        })
+    return tuple(preview)
 
 
 def _emit_progress(progress: ProgressCallback | None, stage: str, **details: object) -> None:
