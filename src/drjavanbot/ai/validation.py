@@ -87,8 +87,9 @@ def validate_answer_payload(payload: dict[str, Any], pack: EvidencePack, *, ques
     """Validate every displayable factual claim against exact archive excerpts.
 
     A model cannot use a global citation to justify arbitrary prose. Every claim
-    must name supplied archive messages, quote text that is literally present in
-    those messages, and keep all substantive claim vocabulary inside those
+    must name supplied archive messages, quote text literally present in those
+    messages, preserve every support quote as an exact normalized sequence in the
+    displayed claim, and keep any remaining substantive vocabulary inside those
     verified quotes. Aggregate source IDs, evidence counts and confidence are
     derived locally rather than trusted from model output.
     """
@@ -191,6 +192,7 @@ def _validate_claim(value: Any, pack: EvidencePack) -> GroundedClaim:
     if not supports:
         raise CitationValidationError("claim has no valid archive support")
 
+    _validate_exact_quote_sequences(text, supports)
     _validate_technical_tokens(text, supports)
     _validate_claim_vocabulary(text, supports)
     return GroundedClaim(kind=kind, text=text, supports=tuple(supports))
@@ -219,6 +221,21 @@ def _validate_support(value: Any, pack: EvidencePack) -> ClaimSupport:
         raise CitationValidationError("support quote is not present in the cited archive message")
     item = matching[0]
     return ClaimSupport(message_id=raw_id, source_ref=item.source_ref, quote=quote.strip())
+
+
+def _validate_exact_quote_sequences(text: str, supports: list[ClaimSupport]) -> None:
+    """Prevent semantic inversion or dropped negation while using the same words.
+
+    Vocabulary-set validation alone cannot distinguish «A بهتر از B» from
+    «B بهتر از A», and it can miss a removed negation. Requiring each verified
+    quote to occur intact in the normalized displayed claim preserves the exact
+    archive assertion; the model may only add neutral framing around it.
+    """
+    normalized_text = normalize_text(text)
+    for support in supports:
+        normalized_quote = normalize_text(support.quote)
+        if normalized_quote not in normalized_text:
+            raise CitationValidationError("claim must preserve every support quote as an exact sequence")
 
 
 def _validate_technical_tokens(text: str, supports: list[ClaimSupport]) -> None:
