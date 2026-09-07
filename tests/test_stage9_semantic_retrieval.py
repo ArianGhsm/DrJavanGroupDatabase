@@ -102,7 +102,7 @@ def _plan(*, searchable=True, families=None):
     }, ensure_ascii=False)
 
 
-def _answer(*, supports=((1, "کامپوزیت"), (2, "کامپوزیت")), text="در پیام‌های گروه چند تجربه درباره کامپوزیت مطرح شده است."):
+def _answer(*, supports=((1, "کامپوزیت"), (2, "کامپوزیت")), text="در پیام‌های گروه کامپوزیت مطرح شده است."):
     return json.dumps({
         "insufficient_evidence": False,
         "claims": [{
