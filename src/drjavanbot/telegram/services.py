@@ -65,6 +65,8 @@ class RuntimeServices:
     def request_software_update(self): return self.updates.request("update")
     def request_rollback(self): return self.updates.request("rollback")
     def update_status(self): return self.updates.status()
+    def remote_update_info(self): return self.updates.remote_version()
+    def claim_update_notification(self,sha): return self.updates.claim_update_notification(sha)
     def reindex(self):
         if not self._reindex_lock.acquire(blocking=False): return None
         handle=None; locked=False
