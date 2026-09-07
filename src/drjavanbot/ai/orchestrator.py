@@ -29,6 +29,7 @@ from .prompts import (
     PROMPT_VERSION,
     REFINEMENT_SYSTEM_PROMPT,
     SEARCH_PLANNER_SYSTEM_PROMPT,
+    SYNTHESIS_INSUFFICIENT_RECHECK_SUFFIX,
     SYNTHESIS_RETRY_SUFFIX,
     SYNTHESIS_SYSTEM_PROMPT,
     refinement_user_prompt,
@@ -150,7 +151,8 @@ class ArchiveAnswerService:
         # A strong topical hit is not equivalent to answering a requested facet.
         # Timing, comparison, recommendation, cause, method and quantity questions
         # receive one bounded rescue pass even when lexical scores look healthy.
-        if plan_requires_deep_retrieval(plan):
+        facet_sensitive = plan_requires_deep_retrieval(plan)
+        if facet_sensitive:
             needs_refinement = True
             retrieval_reason = f"answer_facet_check:{retrieval_reason}"
 
@@ -258,7 +260,7 @@ class ArchiveAnswerService:
                         max(budget.max_output_tokens * 2, 1_200),
                     ),
                 )
-                _emit_progress(progress, "repairing", ai_calls=ai_calls + 1)
+                _emit_progress(progress, "repairing", ai_calls=ai_calls + 1, reason="invalid_structure")
                 retry_kwargs = dict(synthesis_kwargs)
                 retry_kwargs["system_prompt"] = SYNTHESIS_SYSTEM_PROMPT + SYNTHESIS_RETRY_SUFFIX
                 retry_kwargs["max_output_tokens"] = retry_tokens
@@ -269,6 +271,37 @@ class ArchiveAnswerService:
                     cacheable = False
                     _emit_progress(progress, "validation_failed", ai_calls=ai_calls)
                     answer = _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
+
+        # A valid `insufficient_evidence=true` is not automatically final for a
+        # faceted question. The common false-negative is a Telegram thread where
+        # the topic is in one message and the requested age/number/recommendation
+        # is in a neighboring short reply. If one logical call remains, ask the
+        # model to re-read the SAME admitted evidence once. Exact-quote validation
+        # remains unchanged, so this cannot turn model memory into an answer.
+        if (
+            answer.insufficient_evidence
+            and facet_sensitive
+            and ai_calls < MAX_LOGICAL_AI_CALLS
+            and bool(pack.messages)
+        ):
+            _emit_progress(progress, "repairing", ai_calls=ai_calls + 1, reason="insufficient_recheck")
+            recheck_kwargs = dict(synthesis_kwargs)
+            recheck_kwargs["request_type"] = "synthesis_recheck"
+            recheck_kwargs["system_prompt"] = SYNTHESIS_SYSTEM_PROMPT + SYNTHESIS_INSUFFICIENT_RECHECK_SUFFIX
+            recheck_kwargs["max_output_tokens"] = max(
+                budget.max_output_tokens,
+                min(self.config.structured_retry_output_tokens, max(budget.max_output_tokens * 2, 1_200)),
+            )
+            ai_calls += 1
+            original_insufficient = answer
+            try:
+                _, reconsidered = self._call_processed(**recheck_kwargs)
+            except (ModelOutputError, CitationValidationError):
+                # The first answer was valid and safely insufficient. A malformed
+                # recheck must not replace it with a generic internal failure.
+                answer = original_insufficient
+            else:
+                answer = reconsidered
 
         answer = replace(
             answer,
