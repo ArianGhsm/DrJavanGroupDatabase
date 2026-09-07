@@ -40,10 +40,12 @@ class RuntimeServices:
         key=self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
         if not key: return False
         ok=DeepSeekV4AvalAIClient(self._ai_config()).validate_api_key(key); self.state.set_provider_auth_failed(not ok); return ok
-    def answer(self,question):
+    def answer(self,question): return self._answer(question,progress=None)
+    def answer_with_progress(self,question,progress): return self._answer(question,progress=progress)
+    def _answer(self,question,progress=None):
         if not self.db_path.exists(): raise IndexNotReadyError("index database does not exist")
         backend=SQLiteSearchBackend(self.db_path); config=self._ai_config(); service=ArchiveAnswerService(backend=backend,secret_store=self.secret_store,config=config,provider=DeepSeekV4AvalAIClient(config),cache=self.cache,planner_cache=self.planner_cache,telemetry=self.telemetry)
-        try: result=service.answer(question)
+        try: result=service.answer(question,progress=progress)
         except AuthenticationError: self.state.set_provider_auth_failed(True); raise
         except sqlite3.OperationalError as exc:
             if "locked" in str(exc).casefold() or "busy" in str(exc).casefold(): raise IndexNotReadyError("archive index is temporarily busy") from exc
