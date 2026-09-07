@@ -32,6 +32,9 @@ class TelegramBotApp(CoreTelegramBotApp):
                 "🦷 <b>DrJavanBot</b>\nسؤال را بفرستید؛ پاسخ فقط بر پایه آرشیو گروه تولید می‌شود.\n\nمالک شناسایی شد؛ پنل مدیریت از دکمه زیر در دسترس است.",
                 reply_markup=self._owner_home_keyboard(),
             )
+            # Explicit /start always refreshes the GitHub version check. Failure
+            # is best-effort and never blocks the owner panel.
+            self.notify_update_if_available(force=True)
             return
         if command in {"/panel", "/settings"}:
             if not self._require_owner_private(chat_id, user_id, is_private):
@@ -52,6 +55,48 @@ class TelegramBotApp(CoreTelegramBotApp):
             self._show_recent_errors(chat_id)
             return
         super()._handle_command(chat_id, user_id, is_private, text)
+
+    def notify_update_if_available(self, *, force: bool = False) -> bool:
+        remote = getattr(self.services, "remote_update_info", None)
+        claim = getattr(self.services, "claim_update_notification", None)
+        if not callable(remote):
+            return False
+        try:
+            info = remote()
+        except Exception:
+            return False
+        if info is None or not getattr(info, "update_available", False):
+            return False
+        latest = str(getattr(info, "latest_sha", "") or "")
+        current = str(getattr(info, "current_sha", "") or "")
+        if not latest:
+            return False
+        if not force and callable(claim):
+            try:
+                if not claim(latest):
+                    return False
+            except Exception:
+                return False
+        elif force and callable(claim):
+            try:
+                claim(latest)
+            except Exception:
+                pass
+        text = (
+            "🆕 <b>نسخه جدید DrJavanBot موجود است</b>\n"
+            f"Current: <code>{html_escape(current[:12] if current else 'unknown')}</code>\n"
+            f"Latest: <code>{html_escape(latest[:12])}</code>\n\n"
+            "نصب خودکار و بدون تأیید انجام نمی‌شود؛ با دکمه زیر candidate ابتدا کامل تست می‌شود."
+        )
+        self.api.send_message(
+            self.owner_id,
+            text,
+            reply_markup=inline_keyboard([
+                [("🧪 تست و نصب", "software_update_confirm")],
+                [("📋 وضعیت آپدیتر", "software_update")],
+            ]),
+        )
+        return True
 
     def _handle_callback(self, cb: dict) -> None:
         data = str(cb.get("data") or "")
@@ -88,10 +133,10 @@ class TelegramBotApp(CoreTelegramBotApp):
                 text = (
                     "✅ درخواست آپدیت ثبت شد.\n"
                     f"Request: <code>{html_escape(request_id)}</code>\n"
-                    "Updater جداگانه GitHub را fetch می‌کند، تست‌ها را اجرا می‌کند و فقط در صورت موفقیت نسخه را جایگزین می‌کند."
+                    "Updater candidate را در کنار نسخه فعال می‌سازد و تا پایان تست و index، ربات فعلی روشن می‌ماند."
                 )
             except RuntimeError:
-                text = "⏳ یک درخواست آپدیت/rollback از قبل در صف است."
+                text = "⏳ یک درخواست آپدیت/rollback فعال است. وضعیت را باز کنید؛ درخواست stale پس از timeout قابل جایگزینی است."
             self.api.edit_message_text(
                 chat_id,
                 message_id,
@@ -115,7 +160,7 @@ class TelegramBotApp(CoreTelegramBotApp):
                 request_id = self.services.request_rollback()
                 text = "✅ درخواست rollback ثبت شد.\nRequest: <code>%s</code>" % html_escape(request_id)
             except RuntimeError:
-                text = "⏳ یک درخواست آپدیت/rollback از قبل در صف است."
+                text = "⏳ یک درخواست آپدیت/rollback از قبل فعال است."
             self.api.edit_message_text(
                 chat_id,
                 message_id,
