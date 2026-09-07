@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import hashlib
 from pathlib import Path
 import sqlite3
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from drjavanbot.domain import LinkRef, MediaRef, MessageRecord, MessageType
 from drjavanbot.normalization import normalize_author, normalize_text, tokenize
@@ -30,6 +31,35 @@ class SQLiteSearchBackend:
             raise FileNotFoundError(db_path)
 
     def search(self, query: SearchQuery) -> tuple[EvidenceCandidate, ...]:
+        connection = connect_database(self.db_path, readonly=True)
+        try:
+            ensure_schema_readonly(connection)
+            return self._search_with_connection(connection, query)
+        finally:
+            connection.close()
+
+    def search_many(self, queries: Sequence[SearchQuery]) -> tuple[tuple[EvidenceCandidate, ...], ...]:
+        """Execute related query families on one read connection.
+
+        Semantic planning commonly emits several short query families. Reusing
+        the same SQLite connection preserves its page cache and avoids repeated
+        connection/schema setup while keeping every query independently scored.
+        """
+        query_tuple = tuple(queries)
+        if not query_tuple:
+            return ()
+        connection = connect_database(self.db_path, readonly=True)
+        try:
+            ensure_schema_readonly(connection)
+            return tuple(self._search_with_connection(connection, query) for query in query_tuple)
+        finally:
+            connection.close()
+
+    def _search_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        query: SearchQuery,
+    ) -> tuple[EvidenceCandidate, ...]:
         normalized = normalize_text(query.normalized_query or query.raw_query)
         if not normalized:
             return ()
@@ -42,90 +72,100 @@ class SQLiteSearchBackend:
         scores: dict[int, float] = defaultdict(float)
         reasons: dict[int, set[str]] = defaultdict(set)
         matched: dict[int, set[str]] = defaultdict(set)
+        filters, params = _filters(query)
 
-        connection = connect_database(self.db_path, readonly=True)
-        try:
-            ensure_schema_readonly(connection)
-            filters, params = _filters(query)
+        # A. exact normalized phrase via FTS phrase query, then verified by substring.
+        for row in _fts(connection, _phrase(normalized), filters, params, candidate_limit):
+            if normalized in (row["text_normalized"] or ""):
+                rowid = int(row["id"])
+                scores[rowid] += 6.0
+                reasons[rowid].add("exact_phrase")
+                matched[rowid].add(normalized)
 
-            # A. exact normalized phrase via FTS phrase query, then verified by substring.
-            for row in _fts(connection, _phrase(normalized), filters, params, candidate_limit):
-                if normalized in (row["text_normalized"] or ""):
-                    rowid = int(row["id"])
-                    scores[rowid] += 6.0
-                    reasons[rowid].add("exact_phrase")
-                    matched[rowid].add(normalized)
+        # B/C. Primary tokens use AND/OR; lexical expansions stay phrase-level
+        # so variants such as "ان پی جی" never leak generic single tokens.
+        primary_tokens = tokenize(normalized)
+        if primary_tokens:
+            and_expr = " AND ".join(_quote_fts(token) for token in primary_tokens)
+            for row in _fts(connection, and_expr, filters, params, candidate_limit):
+                rowid = int(row["id"])
+                scores[rowid] += 3.0
+                reasons[rowid].add("normalized_tokens")
+                text = row["text_normalized"] or ""
+                matched[rowid].update(token for token in primary_tokens if token in text)
 
-            # B/C. Primary tokens use AND/OR; lexical expansions stay phrase-level
-            # so variants such as "ان پی جی" never leak generic single tokens.
-            primary_tokens = tokenize(normalized)
-            if primary_tokens:
-                and_expr = " AND ".join(_quote_fts(token) for token in primary_tokens)
-                for row in _fts(connection, and_expr, filters, params, candidate_limit):
-                    rowid = int(row["id"])
-                    scores[rowid] += 3.0
-                    reasons[rowid].add("normalized_tokens")
-                    text = row["text_normalized"] or ""
-                    matched[rowid].update(token for token in primary_tokens if token in text)
+        expressions: list[str] = [_quote_fts(token) for token in primary_tokens]
+        expressions.extend(_quote_fts(variant) for variant in variants[1:] if variant)
+        if expressions:
+            or_expr = " OR ".join(expressions[:64])
+            for row in _fts(connection, or_expr, filters, params, candidate_limit):
+                rowid = int(row["id"])
+                rank = float(row["rank"] or 0.0)
+                scores[rowid] += 1.5 + min(1.5, abs(rank))
+                reasons[rowid].add("fts_bm25")
+                text = row["text_normalized"] or ""
+                matched[rowid].update(token for token in primary_tokens if token in text)
+                synonym_hits = [term for term in synonyms if term and term in text]
+                if synonym_hits:
+                    scores[rowid] += 0.8
+                    reasons[rowid].add("synonym")
+                    matched[rowid].update(synonym_hits)
 
-            expressions: list[str] = [_quote_fts(token) for token in primary_tokens]
-            expressions.extend(_quote_fts(variant) for variant in variants[1:] if variant)
-            if expressions:
-                or_expr = " OR ".join(expressions[:64])
-                for row in _fts(connection, or_expr, filters, params, candidate_limit):
-                    rowid = int(row["id"])
-                    rank = float(row["rank"] or 0.0)
-                    scores[rowid] += 1.5 + min(1.5, abs(rank))
-                    reasons[rowid].add("fts_bm25")
-                    text = row["text_normalized"] or ""
-                    matched[rowid].update(token for token in primary_tokens if token in text)
-                    synonym_hits = [term for term in synonyms if term and term in text]
-                    if synonym_hits:
-                        scores[rowid] += 0.8
-                        reasons[rowid].add("synonym")
-                        matched[rowid].update(synonym_hits)
-
-            # D. bounded typo correction against FTS vocabulary only.
-            fuzzy_terms: list[tuple[str, float]] = []
-            for token in tokenize(normalized):
+        # D. bounded typo correction only for primary tokens that lexical search
+        # did not actually cover. Running vocabulary similarity for already-hit
+        # common terms adds latency but almost no recall; a missing typo token is
+        # still expanded even when another token in the same query had matches.
+        covered_primary = {
+            token
+            for terms in matched.values()
+            for token in primary_tokens
+            if token in terms
+        }
+        fuzzy_terms: list[tuple[str, float]] = []
+        for token in primary_tokens:
+            if token not in covered_primary:
                 fuzzy_terms.extend(_fuzzy_expansions(connection, token))
-            if fuzzy_terms:
-                fuzzy_expr = " OR ".join(_quote_fts(term) for term, _ in fuzzy_terms[:16])
-                similarity_by_term = dict(fuzzy_terms)
-                for row in _fts(connection, fuzzy_expr, filters, params, candidate_limit):
-                    rowid = int(row["id"])
-                    text = row["text_normalized"] or ""
-                    hit_terms = [term for term, _ in fuzzy_terms if term in text]
-                    if hit_terms:
-                        best = max(similarity_by_term[term] for term in hit_terms)
-                        scores[rowid] += 1.6 * best
-                        reasons[rowid].add("fuzzy")
-                        matched[rowid].update(hit_terms)
+        fuzzy_terms = list(dict.fromkeys(fuzzy_terms))[:16]
+        if fuzzy_terms:
+            fuzzy_expr = " OR ".join(_quote_fts(term) for term, _ in fuzzy_terms)
+            similarity_by_term = dict(fuzzy_terms)
+            for row in _fts(connection, fuzzy_expr, filters, params, candidate_limit):
+                rowid = int(row["id"])
+                text = row["text_normalized"] or ""
+                hit_terms = [term for term, _ in fuzzy_terms if term in text]
+                if hit_terms:
+                    best = max(similarity_by_term[term] for term in hit_terms)
+                    scores[rowid] += 1.6 * best
+                    reasons[rowid].add("fuzzy")
+                    matched[rowid].update(hit_terms)
 
-            ranked_ids = [rowid for rowid, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:candidate_limit]]
-            records = _load_records(connection, ranked_ids)
-            ordered = [records[rowid] for rowid in ranked_ids if rowid in records]
+        ranked_ids = [
+            rowid for rowid, _ in
+            sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:candidate_limit]
+        ]
+        records = _load_records(connection, ranked_ids)
+        ordered = [records[rowid] for rowid in ranked_ids if rowid in records]
 
-            cluster_counts: dict[str, int] = defaultdict(int)
-            for record in ordered:
-                cluster_counts[_cluster_key(record)] += 1
+        cluster_counts: dict[str, int] = defaultdict(int)
+        for record in ordered:
+            cluster_counts[_cluster_key(record)] += 1
 
-            output: list[EvidenceCandidate] = []
-            seen_author_cluster: dict[tuple[str, str | None], MessageRecord] = {}
-            for rowid in ranked_ids:
-                record = records.get(rowid)
-                if record is None:
-                    continue
-                cluster = _cluster_key(record)
-                author_cluster = (cluster, record.author_normalized)
-                first = seen_author_cluster.get(author_cluster)
-                duplicate_of = first.message_id if first is not None else None
-                if first is not None:
-                    # Collapse repeated/copied content by the same author. Identical
-                    # text from an independent author stays as independent evidence.
-                    continue
-                seen_author_cluster[author_cluster] = record
+        output: list[EvidenceCandidate] = []
+        seen_author_cluster: dict[tuple[str, str | None], MessageRecord] = {}
+        for rowid in ranked_ids:
+            record = records.get(rowid)
+            if record is None:
+                continue
+            cluster = _cluster_key(record)
+            author_cluster = (cluster, record.author_normalized)
+            first = seen_author_cluster.get(author_cluster)
+            duplicate_of = first.message_id if first is not None else None
+            if first is not None:
+                continue
+            seen_author_cluster[author_cluster] = record
 
+            context: tuple[MessageRecord, ...] = ()
+            if query.include_context:
                 before, after = _adaptive_context(record, query)
                 context = tuple(self._get_context_with_connection(
                     connection,
@@ -135,19 +175,66 @@ class SQLiteSearchBackend:
                     follow_reply=True,
                     reply_depth=max(0, min(query.reply_depth, 6)),
                 ))
-                output.append(EvidenceCandidate(
-                    message=record,
-                    local_score=round(scores[rowid], 6),
-                    matched_terms=tuple(sorted(matched[rowid])),
-                    match_reasons=tuple(sorted(reasons[rowid])),
-                    context=context,
-                    cluster_key=cluster,
-                    cluster_size=cluster_counts[cluster],
-                    duplicate_of=duplicate_of,
+            output.append(EvidenceCandidate(
+                message=record,
+                local_score=round(scores[rowid], 6),
+                matched_terms=tuple(sorted(matched[rowid])),
+                match_reasons=tuple(sorted(reasons[rowid])),
+                context=context,
+                cluster_key=cluster,
+                cluster_size=cluster_counts[cluster],
+                duplicate_of=duplicate_of,
+            ))
+            if len(output) >= evidence_limit:
+                break
+        return tuple(output)
+
+    def hydrate_context(
+        self,
+        candidates: Sequence[EvidenceCandidate],
+        *,
+        reply_depth: int = 4,
+        limit: int = 24,
+    ) -> tuple[EvidenceCandidate, ...]:
+        """Hydrate context only for fused winners using one read connection."""
+        values = tuple(candidates)
+        if not values:
+            return ()
+        bounded_limit = max(0, min(int(limit), len(values), 40))
+        bounded_depth = max(0, min(int(reply_depth), 6))
+        connection = connect_database(self.db_path, readonly=True)
+        try:
+            ensure_schema_readonly(connection)
+            hydrated: list[EvidenceCandidate] = []
+            for index, candidate in enumerate(values):
+                if index >= bounded_limit:
+                    hydrated.append(candidate)
+                    continue
+                query = SearchQuery(
+                    raw_query=candidate.message.text_normalized or candidate.message.text_raw,
+                    reply_depth=bounded_depth,
+                )
+                before, after = _adaptive_context(candidate.message, query)
+                context = tuple(self._get_context_with_connection(
+                    connection,
+                    candidate.message,
+                    before=before,
+                    after=after,
+                    follow_reply=True,
+                    reply_depth=bounded_depth,
                 ))
-                if len(output) >= evidence_limit:
-                    break
-            return tuple(output)
+                reasons = set(candidate.match_reasons)
+                score = candidate.local_score
+                if context:
+                    reasons.add("context_available")
+                    score += 0.20
+                hydrated.append(replace(
+                    candidate,
+                    local_score=round(score, 6),
+                    match_reasons=tuple(sorted(reasons)),
+                    context=context,
+                ))
+            return tuple(hydrated)
         finally:
             connection.close()
 
