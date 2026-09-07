@@ -15,19 +15,43 @@ Owner private Telegram /settings
   -> fetch origin/main (never live git pull)
   -> require fast-forward ancestry from active release
   -> create/verify /opt/drjavanbot/releases/<sha> worktree + release-specific .venv
-  -> reconcile locked dependencies even after an interrupted prior install
   -> compile + full pytest with isolated TMPDIR and explicit --basetemp
-  -> build complete staging archive index in isolated staging data
-  -> health + local smoke + Telegram getMe
+  -> build complete staging archive index while the current bot remains online
+  -> health + local smoke + Telegram getMe against staging
+  -> publish candidate permissions as root-owned read/execute-only (dirs 0755, files 0644/0755)
   -> only if all gates pass: stop only drjavanbot.service
   -> SQLite backup + atomic /opt/drjavanbot/current symlink switch
-  -> production full reindex
+  -> promote the already-tested staging SQLite DB atomically instead of reindexing a second time
   -> restart only drjavanbot.service and require stable-active window
   -> post-start smoke + Telegram check + stable-active check
   -> on any failure: previous symlink + SQLite state are restored and old bot restarted
 ```
 
 The Telegram process never runs sudo, git, pip or arbitrary shell commands. It can only write a schema-validated `update` or `rollback` request. Repository URL, branch, service name and deployment paths are fixed in root-owned code.
+
+## Automatic update discovery
+
+The running bot checks the public GitHub `main` SHA once at process startup and then every 300 seconds by default (`DRJAVAN_TG_UPDATE_CHECK_INTERVAL_SECONDS=300`). If a newer SHA exists, the Owner receives one notification for that SHA with **Test & Install** and updater-status buttons. Duplicate periodic notifications for the same SHA are suppressed.
+
+An explicit Owner `/start` also refreshes the GitHub check immediately. Discovery does **not** silently install code: deployment still requires the Owner confirmation button so a bad remote commit cannot automatically replace production.
+
+## Progress and stale-request recovery
+
+While the root updater is active it writes safe, Owner-readable progress to `result.json` (fetch, release preparation, tests, staging index, switch, service start). The Software Update panel therefore shows `running` plus the current stage instead of remaining indefinitely at `pending`.
+
+`drjavanbot-updater.service` has a finite 30-minute systemd timeout. A request that remains without a live updater heartbeat for more than 45 minutes is shown as `stalled`; a subsequent Owner request may replace that stale request. This prevents a dead request file from permanently blocking future updates.
+
+## Release permission invariant
+
+The updater runs with `UMask=0077`, but the Telegram service runs as the unprivileged `drjavanbot` user. Before any `current` switch, the candidate release is explicitly normalized so:
+
+- `/opt/drjavanbot` and `/opt/drjavanbot/releases` are traversable (`0755`)
+- release directories are root-owned `0755`
+- normal release files are root-owned `0644`
+- executable files and virtualenv entrypoints are root-owned `0755`
+- the service user can read/execute the release but cannot modify it
+
+Rollback applies the same invariant to the selected previous release before switching.
 
 ## Why updater executes from `current`
 
@@ -58,7 +82,7 @@ The server remains authoritative: a GitHub-green commit is not deployed unless s
 
 ## Archive updates
 
-New or replaced `messages*.html` files committed to the repository are included in the candidate release. The updater builds a fresh staging index from that candidate archive, so malformed/new Telegram exports fail before the active bot is stopped. After a successful code switch the production index is rebuilt atomically.
+New or replaced `messages*.html` files committed to the repository are included in the candidate release. The updater builds a fresh staging index from that candidate archive, so malformed/new Telegram exports fail before the active bot is stopped. The tested staging database is then promoted atomically during the short switch window; a second full production reindex is no longer performed.
 
 ## Runtime env invariant
 
@@ -85,6 +109,6 @@ systemctl status drjavanbot.service --no-pager
 systemctl status drjavanbot-updater.path --no-pager
 ```
 
-Bootstrap is designed to be rerunnable: it validates the control repo and FTS5, repairs an interrupted release virtualenv, runs tests with an isolated temporary directory, preserves prior history, snapshots systemd units, atomically switches `current`, installs the fixed units, and restores the previous release/unit snapshot if activation fails.
+Bootstrap is designed to be rerunnable: it validates the control repo and FTS5, repairs an interrupted release virtualenv, runs tests with an isolated temporary directory, publishes safe release permissions before switching, preserves prior history, snapshots systemd units, atomically switches `current`, installs the fixed units, and restores the previous release/unit snapshot if activation fails.
 
-After bootstrap, routine workflow is: ChatGPT changes GitHub -> CI -> Owner presses Software Update -> server gates -> atomic deployment.
+After bootstrap, routine workflow is: ChatGPT changes GitHub -> CI -> bot notices the new SHA -> Owner presses Test & Install -> server gates -> atomic deployment.
