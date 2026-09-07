@@ -24,6 +24,11 @@ REQUEST_FILE = UPDATE_DIR / "request.json"
 RESULT_FILE = UPDATE_DIR / "result.json"
 HISTORY_FILE = UPDATE_DIR / "history.json"
 LOCK_FILE = Path("/run/lock/drjavanbot-updater.lock")
+PIP_CACHE_DIR = Path("/var/cache/drjavanbot/pip")
+PIP_NETWORK_TIMEOUT_SECONDS = 60
+PIP_RETRIES = 5
+PIP_OUTER_ATTEMPTS = 2
+PIP_PROCESS_TIMEOUT_SECONDS = 420
 SERVICE = "drjavanbot.service"
 SERVICE_USER = "drjavanbot"
 EXPECTED_REPO = "ArianGhsm/DrJavanGroupDatabase"
@@ -97,7 +102,11 @@ def _update(request_id: str) -> dict:
             raise UpdateFailure("origin/main is not a fast-forward descendant of the active release")
 
     _progress(request_id, "update", "Release جدید و virtualenv در حال آماده‌سازی است.", current_sha=current, target_sha=target)
-    release = _prepare_release(target)
+    release = _prepare_release(
+        target,
+        request_id=request_id,
+        current_sha=current,
+    )
     stage_root = UPDATE_DIR / f"stage-{target[:12]}"
     shutil.rmtree(stage_root, ignore_errors=True)
     previous = _active_release()
@@ -253,7 +262,12 @@ def _run_stage_gates(
     return stage_db
 
 
-def _prepare_release(sha: str) -> Path:
+def _prepare_release(
+    sha: str,
+    *,
+    request_id: str | None = None,
+    current_sha: str | None = None,
+) -> Path:
     RELEASES.mkdir(parents=True, exist_ok=True)
     os.chmod(RELEASES, 0o755)
     try:
@@ -283,12 +297,96 @@ def _prepare_release(sha: str) -> Path:
         shutil.rmtree(venv, ignore_errors=True)
         _run([python_exe, "-m", "venv", str(venv)], timeout=180)
     pip_python = venv / "bin/python"
-    _run([str(pip_python), "-m", "pip", "install", "-r", "requirements.lock"], cwd=release, timeout=600)
-    _run([str(pip_python), "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release, timeout=600)
+    if request_id:
+        _progress(
+            request_id,
+            "update",
+            "وابستگی‌های Python در حال نصب/بازیابی از cache هستند؛ سرویس فعلی همچنان روشن است.",
+            current_sha=current_sha,
+            target_sha=sha,
+        )
+    # requirements-dev.lock already includes requirements.lock. Installing only
+    # the dev lock avoids downloading the same runtime dependency set twice.
+    _pip_install(
+        pip_python,
+        ["-r", "requirements-dev.lock"],
+        cwd=release,
+        request_id=request_id,
+        current_sha=current_sha,
+        target_sha=sha,
+    )
+    # Local project installation does not need the network and must never resolve
+    # dependencies again after the locked dependency gate above.
     _run([str(pip_python), "-m", "pip", "install", "--no-deps", "."], cwd=release, timeout=300)
     (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
     os.chmod(release / ".deploy_commit", 0o644)
     return release
+
+
+def _pip_install(
+    pip_python: Path,
+    args: list[str],
+    *,
+    cwd: Path,
+    request_id: str | None = None,
+    current_sha: str | None = None,
+    target_sha: str | None = None,
+) -> None:
+    """Install locked dependencies with bounded network resilience.
+
+    pip has its own HTTP read timeout, independent from our subprocess timeout.
+    A slow PyPI path previously failed after pip's short default timeout even
+    though the updater itself still had minutes left. We raise pip's per-read
+    timeout, enable its bounded retry logic, reuse a persistent root-only cache,
+    and allow one outer retry. All of this occurs before service stop/switch.
+    """
+    PIP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(PIP_CACHE_DIR, 0o700)
+    pip_env = dict(os.environ)
+    pip_env.update({
+        "PIP_CACHE_DIR": str(PIP_CACHE_DIR),
+        "PIP_DEFAULT_TIMEOUT": str(PIP_NETWORK_TIMEOUT_SECONDS),
+        "PIP_RETRIES": str(PIP_RETRIES),
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_NO_INPUT": "1",
+    })
+    command = [
+        str(pip_python), "-m", "pip", "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--prefer-binary",
+        "--timeout", str(PIP_NETWORK_TIMEOUT_SECONDS),
+        "--retries", str(PIP_RETRIES),
+        *args,
+    ]
+    last_error: Exception | None = None
+    for attempt in range(1, PIP_OUTER_ATTEMPTS + 1):
+        try:
+            _run(
+                command,
+                cwd=cwd,
+                env=pip_env,
+                timeout=PIP_PROCESS_TIMEOUT_SECONDS,
+            )
+            return
+        except (UpdateFailure, subprocess.TimeoutExpired) as exc:
+            last_error = exc
+            if attempt >= PIP_OUTER_ATTEMPTS:
+                break
+            if request_id:
+                _progress(
+                    request_id,
+                    "update",
+                    f"دانلود وابستگی‌ها کند/قطع شد؛ تلاش {attempt + 1}/{PIP_OUTER_ATTEMPTS} پس از مکث کوتاه. سرویس فعلی روشن است.",
+                    current_sha=current_sha,
+                    target_sha=target_sha,
+                )
+            time.sleep(2.0 * attempt)
+    if isinstance(last_error, UpdateFailure):
+        raise last_error
+    if isinstance(last_error, subprocess.TimeoutExpired):
+        raise UpdateFailure("pip dependency installation exceeded the bounded network timeout") from last_error
+    raise UpdateFailure("pip dependency installation failed")
 
 
 def _make_release_runtime_readable(release: Path) -> None:
