@@ -18,6 +18,7 @@ from .prompts import (
     PROMPT_VERSION,
     QUERY_EXPANSION_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
+    SYNTHESIS_RETRY_SUFFIX,
     query_expansion_user_prompt,
     synthesis_user_prompt,
 )
@@ -57,8 +58,6 @@ class ArchiveAnswerService:
     def answer(self, question: str) -> AnswerResult:
         question = question.strip()
         normalized = normalize_text(question)
-        # Punctuation-only/emoji-only questions are not searchable evidence queries.
-        # Treat them as insufficient instead of leaking an internal ValueError to Telegram.
         if not normalized:
             return _not_searchable_answer()
 
@@ -89,15 +88,12 @@ class ArchiveAnswerService:
                     processor=lambda content: parse_query_variants(content, original=question),
                 )
             except (ModelOutputError, CitationValidationError):
-                # Expansion is optional. A malformed expansion must never turn a
-                # usable local retrieval into a user-visible internal error.
                 variants = ()
             ai_calls += 1
             if variants:
                 expansion_used = True
                 candidates = tuple(self.backend.search(SearchQuery(raw_query=question, variants=variants)))
 
-        # If expansion still cannot find evidence, do not spend a synthesis call.
         if not candidates:
             answer = _insufficient_answer(ai_calls=ai_calls, expansion_used=expansion_used)
             if self.cache is not None:
@@ -130,11 +126,21 @@ class ArchiveAnswerService:
             _, answer = self._call_processed(**synthesis_kwargs)
             ai_calls += 1
         except (ModelOutputError, CitationValidationError):
-            # DeepSeek JSON mode can rarely return empty/incomplete content. Retry
-            # exactly once; normal successful requests still use one synthesis call.
+            # A second call is allowed only for malformed/incomplete structured output.
+            # Unlike the old behavior, retrying does not repeat the same too-small cap.
             ai_calls += 1
+            retry_tokens = max(
+                budget.max_output_tokens,
+                min(
+                    self.config.structured_retry_output_tokens,
+                    max(budget.max_output_tokens * 2, 1_200),
+                ),
+            )
+            retry_kwargs = dict(synthesis_kwargs)
+            retry_kwargs["system_prompt"] = SYNTHESIS_SYSTEM_PROMPT + SYNTHESIS_RETRY_SUFFIX
+            retry_kwargs["max_output_tokens"] = retry_tokens
             try:
-                _, answer = self._call_processed(**synthesis_kwargs)
+                _, answer = self._call_processed(**retry_kwargs)
                 ai_calls += 1
             except (ModelOutputError, CitationValidationError):
                 ai_calls += 1
@@ -148,7 +154,6 @@ class ArchiveAnswerService:
             expansion_used=expansion_used,
             evidence_pack_estimated_tokens=pack.estimated_tokens,
         )
-        # Do not cache a transient structured-output failure; a later retry may succeed.
         if self.cache is not None and cacheable:
             self.cache.set(cache_key, answer)
         return answer
@@ -197,20 +202,7 @@ class ArchiveAnswerService:
 
 
 def _validate_synthesis_content(content: str, pack, question: str) -> AnswerResult:
-    payload = parse_json_object(content)
-    # JSON mode guarantees a JSON object, not application-level field types.
-    # Accept numeric citation strings only after deterministic conversion; the
-    # validator still rejects every id/ref that was not present in the evidence pack.
-    ids = payload.get("cited_message_ids")
-    if isinstance(ids, list):
-        normalized_ids: list[object] = []
-        for value in ids:
-            if isinstance(value, str) and value.strip().isdigit():
-                normalized_ids.append(int(value.strip()))
-            else:
-                normalized_ids.append(value)
-        payload["cited_message_ids"] = normalized_ids
-    return validate_answer_payload(payload, pack, question=question)
+    return validate_answer_payload(parse_json_object(content), pack, question=question)
 
 
 def _observed_terms(candidates: Sequence[EvidenceCandidate]) -> tuple[str, ...]:
