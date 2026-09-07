@@ -1,3 +1,3 @@
-"""DrJavanBot local retrieval and evidence-grounded AI pipeline."""
+"""DrJavanBot archive-grounded Telegram Q&A."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
