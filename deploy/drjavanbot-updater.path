@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for DrJavanBot owner update requests
+
+[Path]
+PathExists=/var/lib/drjavanbot/update/request.json
+Unit=drjavanbot-updater.service
+
+[Install]
+WantedBy=multi-user.target
