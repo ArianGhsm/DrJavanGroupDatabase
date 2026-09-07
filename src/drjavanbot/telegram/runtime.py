@@ -14,15 +14,47 @@ from .state import BotStateStore
 
 _LOG = logging.getLogger(__name__)
 
+_PUBLIC_COMMANDS = [
+    {"command": "start", "description": "شروع"},
+    {"command": "help", "description": "راهنما"},
+]
+_OWNER_COMMANDS = [
+    {"command": "start", "description": "شروع و پنل مالک"},
+    {"command": "panel", "description": "پنل مالک"},
+    {"command": "settings", "description": "تنظیمات مالک"},
+    {"command": "health", "description": "سلامت سرویس"},
+    {"command": "stats", "description": "آمار"},
+    {"command": "reindex", "description": "بازسازی ایندکس"},
+    {"command": "update", "description": "آپدیت امن نرم‌افزار"},
+    {"command": "errors", "description": "خطاهای اخیر"},
+    {"command": "help", "description": "راهنما"},
+]
+
+
 class PollingRunner:
     def __init__(self, app: TelegramBotApp, api: TelegramAPI, config: TelegramConfig) -> None:
         self.app = app; self.api = api; self.config = config
         self.stop_event = threading.Event()
         self.executor = ThreadPoolExecutor(max_workers=config.worker_count, thread_name_prefix="drjavan-update")
+
     def stop(self, *_args) -> None: self.stop_event.set()
+
+    def _configure_command_menus(self) -> None:
+        try:
+            self.api.set_my_commands(_PUBLIC_COMMANDS)
+            self.api.set_my_commands(
+                _OWNER_COMMANDS,
+                scope={"type": "chat", "chat_id": self.app.owner_id},
+            )
+            _LOG.info("telegram_command_menus_configured owner_id=%d", self.app.owner_id)
+        except TelegramAPIError as exc:
+            # Command-menu discoverability must never prevent the bot from starting.
+            _LOG.warning("telegram_command_menu_failed error_class=%s", type(exc).__name__)
+
     def run(self) -> None:
         offset: int | None = None
         me = self.api.get_me(); _LOG.info("telegram_bot_started bot_id=%s", me.get("id"))
+        self._configure_command_menus()
         try:
             while not self.stop_event.is_set():
                 try:
@@ -52,6 +84,7 @@ class PollingRunner:
         finally:
             self.executor.shutdown(wait=True,cancel_futures=False); _LOG.info("telegram_bot_stopped")
 
+
 def build_runtime() -> tuple[PollingRunner, TelegramBotApp]:
     settings=Settings.from_env(require_runtime=True); tg=TelegramConfig.from_env()
     assert settings.telegram_bot_token is not None and settings.telegram_owner_id is not None
@@ -60,6 +93,7 @@ def build_runtime() -> tuple[PollingRunner, TelegramBotApp]:
     api=TelegramAPI(settings.telegram_bot_token,timeout_seconds=float(tg.poll_timeout_seconds+10))
     app=TelegramBotApp(api=api,owner_id=settings.telegram_owner_id,services=services,state=state,config=tg)
     return PollingRunner(app,api,tg),app
+
 
 def main() -> int:
     settings=Settings.from_env(require_runtime=True)
