@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from typing import Sequence
 from .models import EvidencePack
 from .planner import SearchPlan
 
-PROMPT_VERSION = "archive-claim-grounding-v5-faceted-retrieval"
+PROMPT_VERSION = "archive-claim-grounding-v6-agentic-retrieval-preview"
 
 SEARCH_PLANNER_SYSTEM_PROMPT = """You are the high-recall search-planning component for a large Persian/English dentistry Telegram archive.
 Return JSON only. Do NOT answer the question and do NOT provide clinical facts.
@@ -35,15 +36,18 @@ Search hints are never evidence and must never leak into the final factual answe
 REFINEMENT_SYSTEM_PROMPT = """You are the second-pass retrieval critic for a local dentistry Telegram archive.
 Return JSON only. Do NOT answer the user and do NOT add clinical facts.
 
-The first retrieval pass may look lexically strong while still missing the exact answer facet. Your job is to improve RECALL, not to judge the dental truth.
+The first retrieval pass may look lexically strong while still missing the exact answer facet. You are given a small PII-redacted retrieval_preview containing REAL archive messages/context from that first pass. Read it as a search diagnostic: decide which required_aspects are already represented, which are missing or only weakly represented, and propose searches that can find the missing part. Do not summarize the preview and do not output its facts.
+
 Use all of these as search-only hints:
 - the original question and required_aspects;
 - existing query families;
-- vocabulary observed in actual retrieved archive messages/context;
+- retrieval diagnostics, including cross-message conversation bridges;
+- the bounded retrieval_preview of actual archive text/context;
+- vocabulary observed in retrieved archive messages/context;
 - broader corpus co-occurrence hints;
 - your general dentistry/language knowledge for synonyms, abbreviations, developmental/treatment-stage terminology and likely Persian/English wording.
 
-Generate NEW query families that specifically target missing/under-covered answer aspects and differently-worded conversations. For age/timing questions, include concise timing/stage/population searches and topic+facet intersections. Prefer real archive vocabulary when available, but model-known terminology is allowed solely to find archive evidence. Never output an answer, age, recommendation or fact as a conclusion.
+Generate NEW query families that specifically target missing/under-covered answer aspects and differently-worded conversations. For age/timing questions, include concise timing/stage/population searches and topic+facet intersections. Prefer real archive vocabulary when available, but model-known terminology is allowed solely to find archive evidence. A number/age or recommendation must never be asserted as a conclusion; final answer facts can come only from subsequently retrieved evidence.
 Generate at most 4 new families and 10 total concise queries. Do not repeat existing queries.
 JSON shape: {"query_families":[{"name":"answer_facet_rescue","queries":["..."]}]}"""
 
@@ -96,6 +100,7 @@ def refinement_user_prompt(
     observed_terms: tuple[str, ...],
     corpus_hints: tuple[str, ...] = (),
     retrieval_diagnostics: dict | None = None,
+    retrieval_preview: Sequence[dict[str, object]] = (),
 ) -> str:
     return json.dumps(
         {
@@ -103,6 +108,7 @@ def refinement_user_prompt(
             "required_aspects": list(plan.required_aspects),
             "existing_plan": plan.summary(),
             "retrieval_diagnostics": retrieval_diagnostics or {},
+            "retrieval_preview": list(retrieval_preview[:14]),
             "observed_archive_vocabulary": list(observed_terms[:36]),
             "corpus_hints": list(corpus_hints[:32]),
         },
@@ -118,8 +124,6 @@ def synthesis_user_prompt(pack: EvidencePack, *, plan: SearchPlan | None = None)
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-# Backward import compatibility for external callers. The orchestrator no longer
-# uses flat expansion in production.
 QUERY_EXPANSION_SYSTEM_PROMPT = REFINEMENT_SYSTEM_PROMPT
 
 def query_expansion_user_prompt(question: str, observed_terms: tuple[str, ...]) -> str:
