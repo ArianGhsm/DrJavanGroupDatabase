@@ -60,22 +60,42 @@ class MemorySecretStore:
 class MockBackend:
     def __init__(self, initial, expanded=None):
         self.initial=tuple(initial); self.expanded=tuple(expanded if expanded is not None else initial); self.index_version="v1"; self.calls=[]
-    def search(self, query): self.calls.append(query); return self.expanded if query.variants else self.initial
+    def search(self, query):
+        self.calls.append(query)
+        q=query.raw_query.casefold()
+        if any(term in q for term in ("درمان ریشه","root canal","refined","corpus hint")):
+            return self.expanded
+        return self.initial
     def get_message(self, message_id): return None
     def get_context(self, message, **kwargs): return ()
     def stats(self): return {"index_version":self.index_version,"messages":10}
 
 
 class MockProvider:
+    """Existing stage-3 tests auto-supply a valid semantic planner response."""
     def __init__(self, contents): self.contents=list(contents); self.calls=[]
     def chat_json(self, **kwargs):
-        self.calls.append(kwargs); content=self.contents.pop(0)
+        self.calls.append(kwargs)
+        if kwargs["request_type"]=="search_plan":
+            question=json.loads(kwargs["user_prompt"])["question"]
+            content=json.dumps({
+                "searchable":True,"intent":"archive_lookup","core_concepts":[question],"aliases":[],
+                "optional_concepts":[],"entity_types":[],
+                "query_families":[
+                    {"name":"topic","queries":[question]},
+                    {"name":"context","queries":[question+" تجربه"]},
+                ],
+                "phrases":[],"exclude_terms":[],"low_information_terms":[],"reply_context":True,
+            },ensure_ascii=False)
+        else:
+            content=self.contents.pop(0)
         return ProviderResult(content,"deepseek-v4-flash",UsageMetrics(100,20,30,130,12.5,"IRT",1.0),12.0)
 
 
 def test_default_token_budgets_are_bounded():
     cfg=AIConfig(); assert cfg.budget_for("RCT چیه").max_evidence_tokens==2500
     assert cfg.budget_for("RCT چیه").max_output_tokens>=800
+    assert cfg.planner_max_output_tokens < cfg.medium_output_tokens
     b=cfg.budget_for("بهترین روش را مقایسه کن و اختلاف نظرات و تجربه ها و مزایا و معایب را کامل جمع بندی کن")
     assert b.max_evidence_tokens<=cfg.hard_evidence_tokens and b.max_messages<=cfg.hard_messages
 
@@ -90,14 +110,15 @@ def test_evidence_pack_caps_and_redacts_obvious_pii():
     assert pack.estimated_tokens<=500 and "09121234567" not in pack.messages[0].text and "x@example.com" not in pack.messages[0].text
 
 
-def test_retrieval_assessment_avoids_expansion_for_strong_exact_match():
+def test_retrieval_assessment_legacy_helper_still_handles_strong_exact_match():
     needs,reason=assess_retrieval([candidate(1,"A","RCT",6.0)]); assert not needs and reason=="strong_top_match"
 
 
-def test_one_call_normal_path():
+def test_two_call_normal_path_plans_then_synthesizes():
     backend=MockBackend([candidate(1,"A","RCT الف"),candidate(2,"B","RCT ب")]); provider=MockProvider([json.dumps(valid_answer(),ensure_ascii=False)])
     answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
-    assert answer.ai_calls==1 and not answer.expansion_used and len(provider.calls)==1 and provider.calls[0]["request_type"]=="synthesis"
+    assert answer.ai_calls==2 and not answer.expansion_used and len(provider.calls)==2
+    assert [c["request_type"] for c in provider.calls]==["search_plan","synthesis"]
     assert answer.evidence_used_count==2 and answer.independent_authors_count==2
 
 
@@ -109,17 +130,23 @@ def test_compact_valid_payload_is_accepted_and_counts_are_local():
     assert answer.evidence_used_count==2 and answer.independent_authors_count==2
 
 
-def test_fallback_expansion_then_synthesis_is_two_calls():
+def test_weak_retrieval_refines_then_synthesizes_in_three_calls():
     backend=MockBackend([], [candidate(1,"A","درمان ریشه",6),candidate(2,"B","درمان ریشه",5)])
-    provider=MockProvider([json.dumps({"variants":["درمان ریشه","root canal"]},ensure_ascii=False),json.dumps(valid_answer(),ensure_ascii=False)])
+    provider=MockProvider([
+        json.dumps({"query_families":[{"name":"refined","queries":["درمان ریشه","root canal"]}]},ensure_ascii=False),
+        json.dumps(valid_answer(),ensure_ascii=False),
+    ])
     answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("موضوعی درباره عصب کشی")
-    assert answer.ai_calls==2 and answer.expansion_used and [c["request_type"] for c in provider.calls]==["expansion","synthesis"] and backend.calls[1].variants
+    assert answer.ai_calls==3 and answer.expansion_used
+    assert [c["request_type"] for c in provider.calls]==["search_plan","search_refinement","synthesis"]
+    assert any("درمان ریشه" in q.raw_query for q in backend.calls)
 
 
-def test_failed_expansion_returns_insufficient_without_synthesis_call():
-    backend=MockBackend([],[]); provider=MockProvider([json.dumps({"variants":["abc"]})])
+def test_failed_refinement_returns_insufficient_without_synthesis_call():
+    backend=MockBackend([],[]); provider=MockProvider([json.dumps({"query_families":[{"name":"refined","queries":["abc"]}]})])
     answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("سؤال ناموجود")
-    assert answer.insufficient_evidence and answer.ai_calls==1 and len(provider.calls)==1
+    assert answer.insufficient_evidence and answer.ai_calls==2 and len(provider.calls)==2
+    assert [c["request_type"] for c in provider.calls]==["search_plan","search_refinement"]
 
 
 def test_fake_citation_is_rejected():
@@ -142,56 +169,56 @@ def test_clinical_question_gets_archive_safety_note_if_model_omits_it():
     assert answer.safety_note_if_needed and "آرشیو" in answer.safety_note_if_needed
 
 
-def test_cache_hit_removes_second_ai_call():
+def test_cache_hit_removes_second_request_ai_calls():
     backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")]); provider=MockProvider([json.dumps(valid_answer(),ensure_ascii=False)])
     with tempfile.TemporaryDirectory() as td:
         cache=ResponseCache(Path(td)/"cache.sqlite3",ttl_seconds=3600); service=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider,cache=cache)
         first=service.answer("RCT"); second=service.answer("RCT")
-        assert not first.cache_hit and second.cache_hit and second.ai_calls==0 and len(provider.calls)==1 and cache.stats().hits==1 and cache.stats().misses==1
+        assert not first.cache_hit and second.cache_hit and second.ai_calls==0 and len(provider.calls)==2 and cache.stats().hits==1 and cache.stats().misses==1
 
 
-def test_index_version_change_invalidates_cache():
+def test_index_version_change_invalidates_answer_cache():
     backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")]); response=json.dumps(valid_answer(),ensure_ascii=False); provider=MockProvider([response,response])
     with tempfile.TemporaryDirectory() as td:
         cache=ResponseCache(Path(td)/"cache.sqlite3",ttl_seconds=3600); service=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider,cache=cache)
         service.answer("RCT"); backend.index_version="v2"; second=service.answer("RCT")
-        assert not second.cache_hit and len(provider.calls)==2
+        assert not second.cache_hit and len(provider.calls)==4
 
 
-def test_telemetry_records_usage_without_content():
+def test_telemetry_records_planner_and_synthesis_without_content():
     backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")]); provider=MockProvider([json.dumps(valid_answer(),ensure_ascii=False)])
     with tempfile.TemporaryDirectory() as td:
         telemetry=TelemetryStore(Path(td)/"usage.sqlite3"); ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider,telemetry=telemetry).answer("RCT")
-        s=telemetry.summary(); assert (s.calls,s.input_tokens,s.cached_input_tokens,s.output_tokens,s.cost_irt)==(1,100,20,30,12.5)
+        s=telemetry.summary(); assert (s.calls,s.input_tokens,s.cached_input_tokens,s.output_tokens,s.cost_irt)==(2,200,40,60,25.0)
         assert b"test-secret-123" not in (Path(td)/"usage.sqlite3").read_bytes()
 
 
-def test_service_without_key_fails_before_synthesis():
+def test_service_without_key_fails_before_planner_or_synthesis():
     backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")]); provider=MockProvider([])
     from drjavanbot.ai.orchestrator import AIConfigurationError
     service=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(None),config=AIConfig(),provider=provider)
     with pytest.raises(AIConfigurationError): service.answer("RCT")
-    assert provider.calls==[]
+    assert provider.calls==[] and backend.calls==[]
 
 
-def test_malformed_synthesis_retries_once_then_returns_safe_result():
+def test_malformed_synthesis_retries_once_with_global_three_call_cap():
     backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")]); provider=MockProvider(["not json","still not json"])
     with tempfile.TemporaryDirectory() as td:
         telemetry=TelemetryStore(Path(td)/"usage.sqlite3")
         answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider,telemetry=telemetry).answer("RCT")
         s=telemetry.summary()
-        assert answer.insufficient_evidence and answer.ai_calls==2 and len(provider.calls)==2
-        assert "دوباره" in answer.direct_answer and s.calls==2 and s.failures==2
-        assert provider.calls[1]["max_output_tokens"] > provider.calls[0]["max_output_tokens"]
+        assert answer.insufficient_evidence and answer.ai_calls==3 and len(provider.calls)==3
+        assert "دوباره" in answer.direct_answer and s.calls==3 and s.failures==2
+        assert provider.calls[2]["max_output_tokens"] > provider.calls[1]["max_output_tokens"]
 
 
 def test_malformed_synthesis_retry_can_recover_with_larger_budget():
     backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")])
     provider=MockProvider(["",json.dumps(valid_answer(),ensure_ascii=False)])
     answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
-    assert answer.direct_answer=="جمع‌بندی مستند آرشیو" and answer.ai_calls==2 and len(provider.calls)==2
-    assert provider.calls[1]["max_output_tokens"] > provider.calls[0]["max_output_tokens"]
-    assert "RETRY INSTRUCTION" in provider.calls[1]["system_prompt"]
+    assert answer.direct_answer=="جمع‌بندی مستند آرشیو" and answer.ai_calls==3 and len(provider.calls)==3
+    assert provider.calls[2]["max_output_tokens"] > provider.calls[1]["max_output_tokens"]
+    assert "RETRY INSTRUCTION" in provider.calls[2]["system_prompt"]
 
 
 def test_numeric_string_citation_ids_are_normalized_then_validated():
