@@ -24,6 +24,11 @@ EXPECTED_REMOTES = {
 }
 UNIT_NAMES = ("drjavanbot.service", "drjavanbot-updater.service", "drjavanbot-updater.path")
 LOCK_FILE = Path("/run/lock/drjavanbot-updater.lock")
+PIP_CACHE_DIR = Path("/var/cache/drjavanbot/pip")
+PIP_NETWORK_TIMEOUT_SECONDS = 60
+PIP_RETRIES = 5
+PIP_OUTER_ATTEMPTS = 2
+PIP_PROCESS_TIMEOUT_SECONDS = 420
 
 
 def main() -> int:
@@ -134,10 +139,36 @@ def _prepare_release(sha: str, python_exe: str) -> Path:
         _run([python_exe, "-m", "venv", str(venv)])
 
     vpython = str(venv / "bin/python")
-    _run([vpython, "-m", "pip", "install", "-r", "requirements.lock"], cwd=release)
-    _run([vpython, "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release)
+    _pip_install(vpython, ["-r", "requirements.lock"], cwd=release)
+    _pip_install(vpython, ["-r", "requirements-dev.lock"], cwd=release)
     _run([vpython, "-m", "pip", "install", "--no-deps", "."], cwd=release)
     return release
+
+
+def _pip_install(python: str, args: list[str], *, cwd: Path) -> None:
+    """Install dependencies with a persistent cache and bounded retries."""
+    PIP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(PIP_CACHE_DIR, 0o700)
+    env = dict(os.environ)
+    env.update({
+        "PIP_CACHE_DIR": str(PIP_CACHE_DIR),
+        "PIP_DEFAULT_TIMEOUT": str(PIP_NETWORK_TIMEOUT_SECONDS),
+        "PIP_RETRIES": str(PIP_RETRIES),
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_NO_INPUT": "1",
+    })
+    command = [python, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--prefer-binary", "--timeout", str(PIP_NETWORK_TIMEOUT_SECONDS), "--retries", str(PIP_RETRIES), *args]
+    last: Exception | None = None
+    for attempt in range(PIP_OUTER_ATTEMPTS):
+        try:
+            _run(command, cwd=cwd, env=env, timeout=PIP_PROCESS_TIMEOUT_SECONDS)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            last = exc
+            if attempt + 1 < PIP_OUTER_ATTEMPTS:
+                time.sleep(2.0 * (attempt + 1))
+    assert last is not None
+    raise last
 
 
 def _make_release_runtime_readable(release: Path) -> None:
@@ -370,8 +401,9 @@ def _run(
     env: dict[str, str] | None = None,
     *,
     check: bool = True,
+    timeout: int | None = None,
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=check)
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=check, timeout=timeout)
 
 
 if __name__ == "__main__":
