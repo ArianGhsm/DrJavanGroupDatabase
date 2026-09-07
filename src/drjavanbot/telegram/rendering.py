@@ -121,9 +121,9 @@ def answer_rich_screen(answer) -> RichScreen:
 
 
 def answer_chunks(answer):
-    """Return one rich-capable string when possible; retain safe legacy chunking."""
+    """Use Rich UI only when the legacy-safe payload also fits one Telegram message."""
     screen = answer_rich_screen(answer)
-    if len(screen.rich_html) <= 32000:
+    if len(screen.fallback_html) <= SAFE_CHUNK and len(screen.rich_html) <= 32000:
         return (rich_text(screen),)
     return _chunk_lines(screen.fallback_html.split("\n"))
 
