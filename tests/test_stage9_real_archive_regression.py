@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 
+from drjavanbot.ai.corpus import sqlite_corpus_hints
 from drjavanbot.ai.planner import SearchFamily, SearchPlan, observed_vocabulary
 from drjavanbot.ai.retrieval import retrieve_with_plan
 from drjavanbot.search import SQLiteSearchBackend
@@ -62,6 +63,12 @@ def test_real_archive_composite_semantic_retrieval_regression(tmp_path: Path):
 
     vocabulary = observed_vocabulary(retrieval.candidates, question="کدوم برند کامپوزیت خوبه؟")
     assert "کدوم" not in vocabulary and "خوبه" not in vocabulary
+
+    # Corpus hints are derived from the same canonical index, not a product
+    # dictionary. They are allowed to guide a second search but are never evidence.
+    corpus_hints = sqlite_corpus_hints(backend, ("کامپوزیت", "composite"), limit=12)
+    assert corpus_hints
+    assert "کدوم" not in corpus_hints and "خوبه" not in corpus_hints
 
 
 def _page_number(path: Path) -> int:
