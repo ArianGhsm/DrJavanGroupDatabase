@@ -25,5 +25,30 @@ jobs:
           python -m pip install --no-deps .
       - name: Compile
         run: python -m compileall -q src deploy
+      - name: Verify SQLite FTS5
+        run: |
+          python - <<'PY'
+          import sqlite3
+          con = sqlite3.connect(':memory:')
+          con.execute('CREATE VIRTUAL TABLE t USING fts5(x)')
+          con.close()
+          PY
+      - name: Verify env shell compatibility
+        shell: bash
+        run: |
+          set -a
+          . ./.env.example
+          set +a
+          test "$DRJAVAN_ARCHIVE_DIR" = "گروه دکتر جوان"
       - name: Test
         run: pytest -q
+      - name: Verify systemd unit syntax and fixed paths
+        shell: bash
+        run: |
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin drjavanbot 2>/dev/null || true
+          sudo install -d /opt/drjavanbot/current/.venv/bin /opt/drjavanbot/current/deploy /etc/drjavanbot /var/lib/drjavanbot/update /var/cache/drjavanbot
+          sudo touch /opt/drjavanbot/current/.venv/bin/drjavanbot-bot
+          sudo chmod +x /opt/drjavanbot/current/.venv/bin/drjavanbot-bot
+          sudo cp deploy/self_update.py /opt/drjavanbot/current/deploy/self_update.py
+          sudo cp .env.example /etc/drjavanbot/drjavanbot.env
+          sudo systemd-analyze verify deploy/drjavanbot.service deploy/drjavanbot-updater.service deploy/drjavanbot-updater.path
