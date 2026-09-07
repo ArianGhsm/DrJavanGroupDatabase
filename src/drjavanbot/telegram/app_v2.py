@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import sqlite3
+
 from .app import TelegramBotApp as CoreTelegramBotApp
 from .rendering import html_escape, inline_keyboard
 
@@ -8,11 +11,12 @@ _UPDATE_CALLBACKS = {
     "software_update_confirm",
     "software_rollback",
     "software_rollback_confirm",
+    "recent_errors",
 }
 
 
 class TelegramBotApp(CoreTelegramBotApp):
-    """Owner updater UI layered over the stable Telegram handler."""
+    """Owner updater/diagnostics UI layered over the stable Telegram handler."""
 
     def _handle_command(self, chat_id: int, user_id: int, is_private: bool, text: str) -> None:
         command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
@@ -20,6 +24,11 @@ class TelegramBotApp(CoreTelegramBotApp):
             if not self._require_owner_private(chat_id, user_id, is_private):
                 return
             self._show_update(chat_id)
+            return
+        if command == "/errors":
+            if not self._require_owner_private(chat_id, user_id, is_private):
+                return
+            self._show_recent_errors(chat_id)
             return
         super()._handle_command(chat_id, user_id, is_private, text)
 
@@ -46,6 +55,9 @@ class TelegramBotApp(CoreTelegramBotApp):
             self.api.send_message(chat_id, "⛔️ این عملیات فقط برای مالک و در گفت‌وگوی خصوصی مجاز است.")
             return
 
+        if data == "recent_errors":
+            self._show_recent_errors(chat_id, message_id)
+            return
         if data == "software_update":
             self._show_update(chat_id, message_id)
             return
@@ -104,8 +116,38 @@ class TelegramBotApp(CoreTelegramBotApp):
             [("📊 آمار", "stats"), ("❤️ Health", "health")],
             [("🗂 Reindex", "reindex"), ("📚 Index", "indexstats")],
             [("🧹 Cache", "cache"), ("👥 دسترسی/Rate", "access")],
-            [("🔄 Software Update", "software_update")],
+            [("🧯 خطاهای اخیر", "recent_errors"), ("🔄 Software Update", "software_update")],
         ])
+        if message_id is None:
+            self.api.send_message(chat_id, text, reply_markup=kb)
+        else:
+            self.api.edit_message_text(chat_id, message_id, text, reply_markup=kb)
+
+    def _show_recent_errors(self, chat_id: int, message_id: int | None = None) -> None:
+        rows = []
+        try:
+            with sqlite3.connect(self.state.path) as con:
+                rows = con.execute(
+                    "SELECT id,created_at,error_class FROM question_usage "
+                    "WHERE success=0 AND error_class IS NOT NULL ORDER BY id DESC LIMIT 8"
+                ).fetchall()
+        except (sqlite3.Error, OSError):
+            rows = []
+        lines = ["<b>خطاهای اخیر</b>"]
+        if not rows:
+            lines.append("خطای ثبت‌شده‌ای وجود ندارد.")
+        else:
+            for error_id, created_at, error_class in rows:
+                try:
+                    stamp = datetime.fromtimestamp(float(created_at), timezone.utc).isoformat(timespec="seconds")
+                except (TypeError, ValueError, OSError):
+                    stamp = "زمان نامشخص"
+                lines.append(
+                    f"<code>Q{int(error_id)}</code> — <code>{html_escape(error_class)}</code> — {html_escape(stamp)}"
+                )
+            lines.append("\nبرای دیباگ فقط Error ID و Class را بفرست؛ متن سؤال یا secret اینجا ذخیره/نمایش داده نمی‌شود.")
+        kb = inline_keyboard([[("🔄 تازه‌سازی", "recent_errors")], [("بازگشت", "settings")]])
+        text = "\n".join(lines)
         if message_id is None:
             self.api.send_message(chat_id, text, reply_markup=kb)
         else:
@@ -140,6 +182,9 @@ class TelegramBotApp(CoreTelegramBotApp):
 
     def _help_text(self, user_id: int) -> str:
         text = super()._help_text(user_id)
-        if user_id == self.owner_id and "/update" not in text:
-            text += "\n/update — آپدیت امن نرم‌افزار"
+        if user_id == self.owner_id:
+            if "/update" not in text:
+                text += "\n/update — آپدیت امن نرم‌افزار"
+            if "/errors" not in text:
+                text += "\n/errors — خطاهای اخیر بدون جزئیات حساس"
         return text
