@@ -153,10 +153,11 @@ def test_weak_first_pass_uses_archive_vocabulary_refinement_and_hard_three_call_
     provider = SequenceProvider([
         _plan(families=[{"name": "topic", "queries": ["کامپوزیت"]}]),
         json.dumps({"query_families": [{"name": "corpus_refinement", "queries": ["ProductZ"]}]}, ensure_ascii=False),
-        _answer(supports=((1, "ProductZ"), (2, "ProductZ")), text="ProductZ در پیام‌های بازیابی‌شده مطرح شده است."),
+        _answer(supports=((1, "ProductZ"), (2, "ProductZ")), text="در پیام‌های گروه ProductZ مطرح شده است."),
     ])
     result = ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider).answer("کدوم برند کامپوزیت خوبه؟")
-    assert result.ai_calls == 3 and result.expansion_used
+    assert result.ai_calls == 3 and result.expansion_used and not result.insufficient_evidence
+    assert result.grounded_claims and result.cited_message_ids == (1, 2)
     assert [c["request_type"] for c in provider.calls] == ["search_plan", "search_refinement", "synthesis"]
     refinement = json.loads(provider.calls[1]["user_prompt"])
     assert any(term.casefold() == "productz" for term in refinement["observed_archive_vocabulary"])
