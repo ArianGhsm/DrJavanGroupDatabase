@@ -255,7 +255,7 @@ def test_disagreement_changes_local_archive_coverage_confidence():
 
 def test_clinical_question_gets_deterministic_archive_safety_note():
     pack = build_evidence_pack("درمان بیمار چیست", [candidate(1, "A", "درمان بیمار پیگیری شود")], AIConfig())
-    payload = supported_answer(text="در گروه پیگیری درمان مطرح شده است.", supports=((1, "درمان بیمار پیگیری شود"),))
+    payload = supported_answer(text="در گروه درمان بیمار پیگیری شود", supports=((1, "درمان بیمار پیگیری شود"),))
     answer = validate_answer_payload(payload, pack, question="درمان بیمار چیست")
     assert answer.safety_note_if_needed
     assert "گروه" in answer.safety_note_if_needed and "هوش مصنوعی" in answer.safety_note_if_needed
