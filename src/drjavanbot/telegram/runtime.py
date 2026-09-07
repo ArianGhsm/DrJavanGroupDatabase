@@ -40,9 +40,13 @@ class PollingRunner:
     def stop(self, *_args) -> None: self.stop_event.set()
 
     def _configure_command_menus(self) -> None:
+        setter = getattr(self.api, "set_my_commands", None)
+        if not callable(setter):
+            _LOG.warning("telegram_command_menu_unavailable")
+            return
         try:
-            self.api.set_my_commands(_PUBLIC_COMMANDS)
-            self.api.set_my_commands(
+            setter(_PUBLIC_COMMANDS)
+            setter(
                 _OWNER_COMMANDS,
                 scope={"type": "chat", "chat_id": self.app.owner_id},
             )
