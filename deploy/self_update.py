@@ -28,7 +28,6 @@ EXPECTED_REPO = "ArianGhsm/DrJavanGroupDatabase"
 ALLOWED_REMOTES = {
     "https://github.com/ArianGhsm/DrJavanGroupDatabase.git",
     "https://github.com/ArianGhsm/DrJavanGroupDatabase",
-    "git@github.com:ArianGhsm/DrJavanGroupDatabase.git",
 }
 MAX_RELEASES = 3
 
@@ -76,6 +75,8 @@ def main() -> int:
 
 def _update(request_id: str) -> dict:
     _verify_control_repo()
+    env = _load_env()
+    _validate_runtime_env(env)
     _run(["git", "-C", str(CONTROL_REPO), "fetch", "--prune", "origin", "main"], timeout=180)
     target = _run_text(["git", "-C", str(CONTROL_REPO), "rev-parse", "origin/main"]).strip()
     current = _current_sha()
@@ -93,34 +94,16 @@ def _update(request_id: str) -> dict:
 
     release = _prepare_release(target)
     stage_root = UPDATE_DIR / f"stage-{target[:12]}"
-    if stage_root.exists():
-        shutil.rmtree(stage_root)
-    stage_data = stage_root / "data"
-    stage_cache = stage_root / "cache"
-    stage_data.mkdir(parents=True, exist_ok=True)
-    stage_cache.mkdir(parents=True, exist_ok=True)
-
-    env = _load_env()
-    test_env = dict(os.environ)
-    test_env.update(env)
-    test_env.update({
-        "DRJAVAN_ARCHIVE_DIR": str(release / "گروه دکتر جوان"),
-        "DRJAVAN_DATA_DIR": str(stage_data),
-        "DRJAVAN_CACHE_DIR": str(stage_cache),
-    })
-
-    python = release / ".venv" / "bin" / "python"
-    _run([str(python), "-m", "compileall", "-q", "src"], cwd=release, env=test_env, timeout=120)
-    _run([str(python), "-m", "pytest", "-q"], cwd=release, env=test_env, timeout=600)
-    _run([str(release / ".venv/bin/drjavanbot"), "reindex"], cwd=release, env=test_env, timeout=900)
-    _run([str(release / ".venv/bin/drjavanbot"), "health"], cwd=release, env=test_env, timeout=120)
-    _run([str(release / ".venv/bin/drjavanbot-smoke")], cwd=release, env=test_env, timeout=120)
-    if env.get("TELEGRAM_BOT_TOKEN"):
-        _run([str(release / ".venv/bin/drjavanbot-smoke"), "--telegram"], cwd=release, env=test_env, timeout=120)
+    shutil.rmtree(stage_root, ignore_errors=True)
+    try:
+        _run_stage_gates(release, stage_root, env)
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
 
     previous = _active_release()
-    db_path = Path(env.get("DRJAVAN_DATA_DIR", "/var/lib/drjavanbot/data")) / "archive.sqlite3"
+    db_path = Path(env["DRJAVAN_DATA_DIR"]) / "archive.sqlite3"
     backup = UPDATE_DIR / f"archive-before-{target[:12]}.sqlite3"
+    db_existed_before = db_path.exists()
 
     _run(["systemctl", "stop", SERVICE], timeout=180)
     try:
@@ -131,39 +114,41 @@ def _update(request_id: str) -> dict:
         prod_env["DRJAVAN_ARCHIVE_DIR"] = str(CURRENT / "گروه دکتر جوان")
         _run([str(CURRENT / ".venv/bin/drjavanbot"), "reindex"], cwd=CURRENT, env=prod_env, timeout=900)
         _run(["systemctl", "start", SERVICE], timeout=180)
-        _wait_active()
+        _wait_active(stable_seconds=4)
         _run([str(CURRENT / ".venv/bin/drjavanbot-smoke")], cwd=CURRENT, env=prod_env, timeout=120)
         if env.get("TELEGRAM_BOT_TOKEN"):
             _run([str(CURRENT / ".venv/bin/drjavanbot-smoke"), "--telegram"], cwd=CURRENT, env=prod_env, timeout=120)
+        _wait_active(stable_seconds=2)
     except Exception:
         _run(["systemctl", "stop", SERVICE], timeout=180, check=False)
         if previous is not None and previous.exists():
             _switch_current(previous)
-        _restore_sqlite(backup, db_path)
+        _restore_sqlite(backup, db_path, existed_before=db_existed_before)
         _run(["systemctl", "start", SERVICE], timeout=180, check=False)
         raise
 
     if current:
         _append_history(current)
     _append_history(target)
-    _run(["git", "-C", str(CONTROL_REPO), "reset", "--hard", target], timeout=120)
     _cleanup_releases(keep={target, _sha_for_release(previous) if previous else None})
-    shutil.rmtree(stage_root, ignore_errors=True)
     backup.unlink(missing_ok=True)
     return _result("success", request_id, "update", current, target, "تست‌ها پاس شدند و release جدید فعال شد.")
 
 
 def _rollback(request_id: str) -> dict:
+    _verify_control_repo()
+    env = _load_env()
+    _validate_runtime_env(env)
     current = _current_sha()
     history = _history()
-    candidates = [sha for sha in reversed(history) if sha != current and (RELEASES / sha).is_dir()]
+    candidates = [sha for sha in reversed(history) if sha != current and _healthy_release_dir(RELEASES / sha, sha)]
     if not candidates:
         raise UpdateFailure("no previous healthy release is available")
     target = candidates[0]
     release = RELEASES / target
-    env = _load_env()
-    db_path = Path(env.get("DRJAVAN_DATA_DIR", "/var/lib/drjavanbot/data")) / "archive.sqlite3"
+    db_path = Path(env["DRJAVAN_DATA_DIR"]) / "archive.sqlite3"
     backup = UPDATE_DIR / f"archive-before-rollback-{int(time.time())}.sqlite3"
+    db_existed_before = db_path.exists()
 
     _run(["systemctl", "stop", SERVICE], timeout=180)
     previous = _active_release()
@@ -175,13 +160,14 @@ def _rollback(request_id: str) -> dict:
         prod_env["DRJAVAN_ARCHIVE_DIR"] = str(CURRENT / "گروه دکتر جوان")
         _run([str(CURRENT / ".venv/bin/drjavanbot"), "reindex"], cwd=CURRENT, env=prod_env, timeout=900)
         _run(["systemctl", "start", SERVICE], timeout=180)
-        _wait_active()
+        _wait_active(stable_seconds=4)
         _run([str(CURRENT / ".venv/bin/drjavanbot-smoke")], cwd=CURRENT, env=prod_env, timeout=120)
+        _wait_active(stable_seconds=2)
     except Exception:
         _run(["systemctl", "stop", SERVICE], timeout=180, check=False)
         if previous is not None and previous.exists():
             _switch_current(previous)
-        _restore_sqlite(backup, db_path)
+        _restore_sqlite(backup, db_path, existed_before=db_existed_before)
         _run(["systemctl", "start", SERVICE], timeout=180, check=False)
         raise
 
@@ -190,17 +176,44 @@ def _rollback(request_id: str) -> dict:
     return _result("rolled_back", request_id, "rollback", current, target, "آخرین release سالم قبلی فعال شد.")
 
 
+def _run_stage_gates(release: Path, stage_root: Path, env: dict[str, str]) -> None:
+    stage_data = stage_root / "data"
+    stage_cache = stage_root / "cache"
+    stage_tmp = stage_root / "tmp"
+    stage_pytest = stage_root / "pytest"
+    for path in (stage_data, stage_cache, stage_tmp):
+        path.mkdir(parents=True, exist_ok=True)
+
+    test_env = dict(os.environ)
+    test_env.update(env)
+    test_env.update({
+        "DRJAVAN_ARCHIVE_DIR": str(release / "گروه دکتر جوان"),
+        "DRJAVAN_DATA_DIR": str(stage_data),
+        "DRJAVAN_CACHE_DIR": str(stage_cache),
+        "TMPDIR": str(stage_tmp),
+        "TEMP": str(stage_tmp),
+        "TMP": str(stage_tmp),
+    })
+
+    python = release / ".venv/bin/python"
+    _run([str(python), "-m", "compileall", "-q", "src", "deploy"], cwd=release, env=test_env, timeout=120)
+    _run([str(python), "-m", "pytest", "-q", "--basetemp", str(stage_pytest)], cwd=release, env=test_env, timeout=600)
+    _run([str(release / ".venv/bin/drjavanbot"), "reindex"], cwd=release, env=test_env, timeout=900)
+    _run([str(release / ".venv/bin/drjavanbot"), "health"], cwd=release, env=test_env, timeout=120)
+    _run([str(release / ".venv/bin/drjavanbot-smoke")], cwd=release, env=test_env, timeout=120)
+    if env.get("TELEGRAM_BOT_TOKEN"):
+        _run([str(release / ".venv/bin/drjavanbot-smoke"), "--telegram"], cwd=release, env=test_env, timeout=120)
+
+
 def _prepare_release(sha: str) -> Path:
     RELEASES.mkdir(parents=True, exist_ok=True)
     release = RELEASES / sha
-    if release.exists():
-        marker = release / ".deploy_commit"
-        if marker.is_file() and marker.read_text(encoding="utf-8").strip() == sha and (release / ".venv/bin/python").exists():
-            return release
+    if release.exists() and not _release_matches_sha(release, sha):
         _run(["git", "-C", str(CONTROL_REPO), "worktree", "remove", "--force", str(release)], check=False, timeout=120)
         shutil.rmtree(release, ignore_errors=True)
+    if not release.exists():
+        _run(["git", "-C", str(CONTROL_REPO), "worktree", "add", "--detach", str(release), sha], timeout=180)
 
-    _run(["git", "-C", str(CONTROL_REPO), "worktree", "add", "--detach", str(release), sha], timeout=180)
     python_exe = shutil.which("python3.11") or shutil.which("python3")
     if not python_exe:
         raise UpdateFailure("Python 3.11+ is not available")
@@ -211,8 +224,13 @@ def _prepare_release(sha: str) -> Path:
         raise UpdateFailure("unable to verify Python version") from exc
     if (major, minor) < (3, 11):
         raise UpdateFailure("Python 3.11+ is required")
-    _run([python_exe, "-m", "venv", str(release / ".venv")], timeout=180)
-    pip_python = release / ".venv/bin/python"
+
+    venv = release / ".venv"
+    if not (venv / "bin/python").exists():
+        shutil.rmtree(venv, ignore_errors=True)
+        _run([python_exe, "-m", "venv", str(venv)], timeout=180)
+    pip_python = venv / "bin/python"
+    # Reconcile dependencies even for a reused candidate release. This repairs interrupted installs.
     _run([str(pip_python), "-m", "pip", "install", "-r", "requirements.lock"], cwd=release, timeout=600)
     _run([str(pip_python), "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release, timeout=600)
     _run([str(pip_python), "-m", "pip", "install", "--no-deps", "."], cwd=release, timeout=300)
@@ -221,12 +239,33 @@ def _prepare_release(sha: str) -> Path:
     return release
 
 
+def _release_matches_sha(release: Path, sha: str) -> bool:
+    try:
+        actual = _run_text(["git", "-C", str(release), "rev-parse", "HEAD"]).strip()
+    except Exception:
+        return False
+    return actual == sha
+
+
+def _healthy_release_dir(release: Path, sha: str) -> bool:
+    if not release.is_dir() or not (release / ".venv/bin/python").exists():
+        return False
+    marker = release / ".deploy_commit"
+    try:
+        return marker.read_text(encoding="utf-8").strip() == sha and _release_matches_sha(release, sha)
+    except OSError:
+        return False
+
+
 def _verify_control_repo() -> None:
     if not (CONTROL_REPO / ".git").exists():
         raise UpdateFailure("control repository is missing")
     remote = _run_text(["git", "-C", str(CONTROL_REPO), "remote", "get-url", "origin"]).strip()
     if remote not in ALLOWED_REMOTES:
         raise UpdateFailure(f"unexpected origin remote for {EXPECTED_REPO}")
+    dirty = _run_text(["git", "-C", str(CONTROL_REPO), "status", "--porcelain", "--untracked-files=no"]).strip()
+    if dirty:
+        raise UpdateFailure("control repository has tracked local modifications")
 
 
 def _read_request() -> dict | None:
@@ -246,16 +285,44 @@ def _read_request() -> dict | None:
 
 
 def _load_env() -> dict[str, str]:
+    if not ENV_FILE.is_file():
+        raise UpdateFailure("runtime env file is missing")
     env: dict[str, str] = {}
-    for raw in ENV_FILE.read_text(encoding="utf-8").splitlines():
+    for number, raw in enumerate(ENV_FILE.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        if not line or line.startswith("#"):
             continue
+        if "=" not in line:
+            raise UpdateFailure(f"invalid env line {number}")
         key, value = line.split("=", 1)
         key = key.strip()
-        if key and key.replace("_", "").isalnum():
-            env[key] = value.strip().strip('"').strip("'")
+        value = value.strip()
+        if not key or not (key[0].isalpha() or key[0] == "_") or not all(ch.isalnum() or ch == "_" for ch in key):
+            raise UpdateFailure(f"invalid env key on line {number}")
+        if value.startswith(('"', "'")):
+            quote = value[0]
+            if len(value) < 2 or value[-1] != quote:
+                raise UpdateFailure(f"unterminated quoted env value on line {number}")
+            value = value[1:-1]
+        elif any(ch.isspace() for ch in value):
+            raise UpdateFailure(f"unquoted whitespace in env value on line {number}")
+        if "\x00" in value or "\n" in value or "\r" in value:
+            raise UpdateFailure(f"invalid control character in env value on line {number}")
+        env[key] = value
     return env
+
+
+def _validate_runtime_env(env: dict[str, str]) -> None:
+    required = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "DRJAVAN_DATA_DIR", "DRJAVAN_CACHE_DIR")
+    missing = [key for key in required if not env.get(key)]
+    if missing:
+        raise UpdateFailure("missing required runtime env keys: " + ",".join(missing))
+    try:
+        owner_id = int(env["TELEGRAM_OWNER_ID"])
+    except ValueError as exc:
+        raise UpdateFailure("TELEGRAM_OWNER_ID must be numeric") from exc
+    if owner_id <= 0:
+        raise UpdateFailure("TELEGRAM_OWNER_ID must be positive")
 
 
 def _current_sha() -> str | None:
@@ -264,7 +331,7 @@ def _current_sha() -> str | None:
         marker = release / ".deploy_commit"
         if marker.is_file():
             value = marker.read_text(encoding="utf-8").strip()
-            if value:
+            if len(value) == 40:
                 return value
     try:
         return _run_text(["git", "-C", str(CONTROL_REPO), "rev-parse", "HEAD"]).strip()
@@ -277,7 +344,7 @@ def _active_release() -> Path | None:
         return None
     try:
         return CURRENT.resolve(strict=True)
-    except FileNotFoundError:
+    except OSError:
         return None
 
 
@@ -285,9 +352,11 @@ def _sha_for_release(path: Path | None) -> str | None:
     if path is None:
         return None
     marker = path / ".deploy_commit"
-    if marker.is_file():
-        return marker.read_text(encoding="utf-8").strip() or None
-    return None
+    try:
+        value = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if len(value) == 40 else None
 
 
 def _switch_current(release: Path) -> None:
@@ -295,6 +364,7 @@ def _switch_current(release: Path) -> None:
     temp_link.unlink(missing_ok=True)
     os.symlink(release, temp_link)
     os.replace(temp_link, CURRENT)
+    _fsync_directory(CURRENT.parent)
 
 
 def _backup_sqlite(src: Path, dst: Path) -> None:
@@ -311,24 +381,35 @@ def _backup_sqlite(src: Path, dst: Path) -> None:
     os.chmod(dst, 0o600)
 
 
-def _restore_sqlite(backup: Path, dst: Path) -> None:
-    if not backup.exists():
-        return
+def _restore_sqlite(backup: Path, dst: Path, *, existed_before: bool) -> None:
     for suffix in ("", "-wal", "-shm", "-journal"):
         Path(str(dst) + suffix).unlink(missing_ok=True)
+    if not existed_before:
+        return
+    if not backup.exists():
+        raise UpdateFailure("SQLite backup is missing during rollback")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, dst)
 
 
-def _wait_active() -> None:
-    deadline = time.monotonic() + 20
+def _wait_active(*, stable_seconds: float = 4.0) -> None:
+    deadline = time.monotonic() + 30
+    stable_since: float | None = None
     while time.monotonic() < deadline:
-        result = subprocess.run(["systemctl", "is-active", "--quiet", SERVICE])
-        if result.returncode == 0:
-            time.sleep(2)
-            return
-        time.sleep(1)
-    raise UpdateFailure("drjavanbot.service did not become active")
+        active = subprocess.run(
+            ["systemctl", "is-active", "--quiet", SERVICE],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode == 0
+        now = time.monotonic()
+        if active:
+            stable_since = stable_since or now
+            if now - stable_since >= stable_seconds:
+                return
+        else:
+            stable_since = None
+        time.sleep(0.5)
+    raise UpdateFailure("drjavanbot.service did not remain active")
 
 
 def _history() -> list[str]:
@@ -338,7 +419,7 @@ def _history() -> list[str]:
         return []
     if not isinstance(value, list):
         return []
-    return [str(x) for x in value if isinstance(x, str) and len(x) >= 7]
+    return [str(x) for x in value if isinstance(x, str) and len(x) == 40]
 
 
 def _append_history(sha: str) -> None:
@@ -386,6 +467,7 @@ def _atomic_json(path: Path, value) -> None:
             os.fsync(handle.fileno())
         os.chmod(temp, 0o600)
         os.replace(temp, path)
+        _fsync_directory(path.parent)
     finally:
         try:
             os.unlink(temp)
@@ -393,26 +475,53 @@ def _atomic_json(path: Path, value) -> None:
             pass
 
 
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _redacted_detail(result: subprocess.CompletedProcess, env: dict[str, str] | None) -> str:
+    detail = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()[-1200:]
+    if env:
+        for key, value in env.items():
+            upper = key.upper()
+            if value and any(marker in upper for marker in ("TOKEN", "KEY", "SECRET", "PASSWORD")):
+                detail = detail.replace(value, "<redacted>")
+    return detail
+
+
 def _run_text(cmd: list[str], **kwargs) -> str:
-    result = _run(cmd, capture=True, **kwargs)
-    return result.stdout
+    result = _run(cmd, **kwargs)
+    return result.stdout or ""
 
 
-def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int = 120, check: bool = True, capture: bool = False):
+def _run(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: int = 120,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
     result = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
         env=env,
         text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         timeout=timeout,
     )
     if check and result.returncode != 0:
-        detail = ""
-        if capture:
-            detail = (result.stderr or result.stdout or "")[-500:]
-        raise UpdateFailure(f"command failed ({result.returncode}): {cmd[0]} {cmd[1] if len(cmd)>1 else ''} {detail}")
+        detail = _redacted_detail(result, env)
+        command = " ".join(cmd[:3])
+        raise UpdateFailure(f"command failed ({result.returncode}): {command}; {detail}")
     return result
 
 
