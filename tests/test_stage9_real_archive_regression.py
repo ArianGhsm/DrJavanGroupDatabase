@@ -13,14 +13,7 @@ RAW_ARCHIVE = ROOT / "گروه دکتر جوان"
 
 
 def test_real_archive_composite_semantic_retrieval_regression(tmp_path: Path):
-    """Exercise the real Telegram export without modifying or hard-coding answers.
-
-    We locate a bounded set of real pages containing the topic, copy those pages
-    to an isolated test directory, build the canonical SQLite index, then execute
-    multiple semantic query families. Product/brand answers are intentionally not
-    asserted: the regression is about evidence recall and context, not a baked-in
-    recommendation.
-    """
+    """Exercise the real Telegram export without modifying or hard-coding answers."""
     selected: list[Path] = []
     for path in sorted(RAW_ARCHIVE.glob("messages*.html"), key=_page_number):
         text = path.read_text(encoding="utf-8", errors="ignore").casefold()
@@ -30,14 +23,18 @@ def test_real_archive_composite_semantic_retrieval_regression(tmp_path: Path):
                 break
     assert selected, "real archive unexpectedly contains no composite/کامپوزیت page"
 
+    # The canonical discovery contract requires page 1 so joined-author
+    # inheritance and logical archive identity stay valid even for a bounded slice.
+    page_one = RAW_ARCHIVE / "messages.html"
+    to_copy = list(dict.fromkeys((page_one, *selected)))
     isolated = tmp_path / "real-archive-slice"
     isolated.mkdir()
-    for source in selected:
+    for source in to_copy:
         shutil.copy2(source, isolated / source.name)
 
     db_path = tmp_path / "archive.sqlite3"
     report = full_reindex(isolated, db_path)
-    assert report.archive_files == len(selected) and report.messages > 0
+    assert report.archive_files == len(to_copy) and report.messages > 0
 
     backend = SQLiteSearchBackend(db_path)
     plan = SearchPlan(
