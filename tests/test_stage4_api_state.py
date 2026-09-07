@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import tempfile
+from urllib.parse import parse_qs
 
 from drjavanbot.telegram.api import TelegramAPI, TelegramResponse, TelegramUnauthorizedError
 from drjavanbot.telegram.state import BotStateStore
@@ -14,6 +15,14 @@ def test_api_repr_redacts_token_and_serializes_markup():
     api.send_message(1,"hi",reply_markup={"inline_keyboard":[]})
     assert "secret-token" not in repr(api)
     assert b"reply_markup" in t.bodies[-1]
+
+def test_api_set_my_commands_serializes_owner_chat_scope():
+    t=Transport(payload={"ok":True,"result":True}); api=TelegramAPI("123:secret-token",transport=t)
+    assert api.set_my_commands([{"command":"settings","description":"پنل مالک"}],scope={"type":"chat","chat_id":42})
+    assert t.urls[-1].endswith("/setMyCommands")
+    body=parse_qs(t.bodies[-1].decode())
+    assert json.loads(body["commands"][0])[0]["command"]=="settings"
+    assert json.loads(body["scope"][0])=={"type":"chat","chat_id":42}
 
 def test_api_unauthorized_error_does_not_expose_token():
     t=Transport(status=401,payload={"ok":False,"error_code":401}); api=TelegramAPI("123:secret-token",transport=t)
