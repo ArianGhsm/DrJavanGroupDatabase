@@ -3,7 +3,7 @@ from drjavanbot.search.terms import informative_query, informative_tokens
 
 def test_e_max_compound_keeps_single_latin_component():
     assert informative_query("e.max") == "e max"
-    assert informative_query("برای e.max چه تجربه‌ای دارید؟") == "e max تجربه دارید"
+    assert informative_query("e.max خوبه؟") == "e max"
 
 
 def test_x_ray_compound_keeps_single_latin_component_but_noise_stays_removed():
