@@ -189,9 +189,13 @@ def test_updater_stage_gates_force_private_temp_and_pytest_basetemp(tmp_path, mo
     stage=tmp_path/"stage"
     calls=[]
     def fake_run(cmd,**kwargs):
-        calls.append((cmd,kwargs)); return SimpleNamespace(returncode=0,stdout="",stderr="")
+        calls.append((cmd,kwargs))
+        if "reindex" in cmd:
+            db=stage/"data"/"archive.sqlite3"; db.parent.mkdir(parents=True,exist_ok=True); db.touch()
+        return SimpleNamespace(returncode=0,stdout="",stderr="")
     monkeypatch.setattr(module,"_run",fake_run)
-    module._run_stage_gates(release,stage,{"TELEGRAM_BOT_TOKEN":"","TELEGRAM_OWNER_ID":"42","DRJAVAN_DATA_DIR":"/data","DRJAVAN_CACHE_DIR":"/cache"})
+    stage_db=module._run_stage_gates(release,stage,{"TELEGRAM_BOT_TOKEN":"","TELEGRAM_OWNER_ID":"42","DRJAVAN_DATA_DIR":"/data","DRJAVAN_CACHE_DIR":"/cache"})
+    assert stage_db==stage/"data"/"archive.sqlite3"
     pytest_calls=[item for item in calls if "pytest" in item[0]]
     assert len(pytest_calls)==1
     cmd,kwargs=pytest_calls[0]
