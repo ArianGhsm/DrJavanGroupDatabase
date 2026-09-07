@@ -6,6 +6,7 @@ import re
 from typing import Iterable, Sequence
 
 SAFE_CHUNK = 3800
+_MAX_VISIBLE_SUPPORT_QUOTES = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,7 @@ def answer_rich_screen(answer) -> RichScreen:
     confidence = str(getattr(answer, "confidence", "low") or "low").casefold()
     reason = str(getattr(answer, "confidence_reason", "") or "").strip()
     safety = getattr(answer, "safety_note_if_needed", None)
+    support_quotes = _grounded_support_quotes(answer)
 
     rich_parts = [
         "<h3>📚 جمع‌بندی پیام‌های گروه</h3>",
@@ -100,6 +102,14 @@ def answer_rich_screen(answer) -> RichScreen:
         ))
         fallback_parts.extend(("<b>جمع‌بندی پشتیبانی‌شده</b>", html_escape(conclusion)))
 
+    if support_quotes:
+        rich_parts.append("<h3>💬 عبارت‌های پشتیبان از گروه</h3>")
+        fallback_parts.append("<b>💬 عبارت‌های پشتیبان از گروه</b>")
+        for message_id, quote in support_quotes:
+            label = f"پیام #{message_id}"
+            rich_parts.append(f"<blockquote><b>{label}</b> — {html_escape(quote)}</blockquote>")
+            fallback_parts.append(f"<b>{label}</b> — «{html_escape(quote)}»")
+
     coverage = {"high": "زیاد", "medium": "متوسط", "low": "محدود"}.get(confidence, "محدود")
     coverage_text = coverage + (f" — {reason}" if reason else "")
     rich_parts.extend((
@@ -112,12 +122,34 @@ def answer_rich_screen(answer) -> RichScreen:
         rich_parts.append(f"<blockquote>{html_escape(safety)}</blockquote>")
         fallback_parts.append(f"<i>{html_escape(safety)}</i>")
     rich_parts.append(
-        "<footer>منبع پاسخ فقط آرشیو گروه دکتر جوان است؛ هوش مصنوعی فقط برای جست‌وجو و خلاصه‌سازی پیام‌های بازیابی‌شده استفاده شده است.</footer>"
+        "<footer>منبع پاسخ فقط آرشیو گروه دکتر جوان است؛ هوش مصنوعی فقط برای جست‌وجو، انتخاب و چیدمان عبارت‌های تأییدشده استفاده شده است.</footer>"
     )
     fallback_parts.append(
-        "<i>منبع پاسخ فقط آرشیو گروه دکتر جوان است؛ هوش مصنوعی فقط برای جست‌وجو و خلاصه‌سازی پیام‌های بازیابی‌شده استفاده شده است.</i>"
+        "<i>منبع پاسخ فقط آرشیو گروه دکتر جوان است؛ هوش مصنوعی فقط برای جست‌وجو، انتخاب و چیدمان عبارت‌های تأییدشده استفاده شده است.</i>"
     )
     return RichScreen("".join(rich_parts), "\n\n".join(fallback_parts), "archive_answer")
+
+
+def _grounded_support_quotes(answer) -> tuple[tuple[int, str], ...]:
+    out: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for claim in tuple(getattr(answer, "grounded_claims", ()) or ()):
+        for support in tuple(getattr(claim, "supports", ()) or ()):
+            try:
+                message_id = int(getattr(support, "message_id"))
+            except (TypeError, ValueError):
+                continue
+            quote = str(getattr(support, "quote", "") or "").strip()
+            if not quote:
+                continue
+            key = (message_id, quote)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+            if len(out) >= _MAX_VISIBLE_SUPPORT_QUOTES:
+                return tuple(out)
+    return tuple(out)
 
 
 def answer_chunks(answer):
@@ -160,17 +192,23 @@ def _split_long_line(line, limit):
     return tuple(parts)
 
 
+def _item_get(item, key: str, default=None):
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
 def _sources_fallback(items, page, *, per_page=5):
     total = max(1, (len(items) + per_page - 1) // per_page)
     page = max(0, min(page, total - 1))
     start = page * per_page
     lines = [f"<b>پیام‌های منبع</b> — صفحه {page + 1}/{total}"]
     for idx, item in enumerate(items[start:start + per_page], start=start + 1):
-        author = html_escape(item.get("author") or "نامشخص")
-        date = html_escape(item.get("datetime") or "تاریخ نامشخص")
-        mid = item.get("message_id")
-        source = html_escape(item.get("source_file") or item.get("source_ref") or "")
-        excerpt = item.get("text") or item.get("text_excerpt") or ""
+        author = html_escape(_item_get(item, "author") or "نامشخص")
+        date = html_escape(_item_get(item, "datetime") or "تاریخ نامشخص")
+        mid = _item_get(item, "message_id")
+        source = html_escape(_item_get(item, "source_file") or _item_get(item, "source_ref") or "")
+        excerpt = _item_get(item, "text") or _item_get(item, "text_excerpt") or ""
         excerpt_line = f"\n{html_escape(excerpt)}" if excerpt else ""
         lines.append(
             f"\n<b>{idx}.</b> {author}\n{date}"
@@ -187,11 +225,11 @@ def sources_rich_screen(items, page, *, per_page=5):
     start = page * per_page
     rich = [f"<h3>📚 پیام‌های منبع — {page + 1}/{total}</h3>"]
     for idx, item in enumerate(items[start:start + per_page], start=start + 1):
-        author = html_escape(item.get("author") or "نامشخص")
-        date = html_escape(item.get("datetime") or "تاریخ نامشخص")
-        mid = item.get("message_id")
-        excerpt = html_escape(item.get("text") or item.get("text_excerpt") or "")
-        source = html_escape(item.get("source_file") or item.get("source_ref") or "")
+        author = html_escape(_item_get(item, "author") or "نامشخص")
+        date = html_escape(_item_get(item, "datetime") or "تاریخ نامشخص")
+        mid = _item_get(item, "message_id")
+        excerpt = html_escape(_item_get(item, "text") or _item_get(item, "text_excerpt") or "")
+        source = html_escape(_item_get(item, "source_file") or _item_get(item, "source_ref") or "")
         heading = f"{idx}. {author} — {date}" + (f" — پیام #{mid}" if mid is not None else "")
         rich.append(f"<h3>{heading}</h3>")
         if excerpt:
