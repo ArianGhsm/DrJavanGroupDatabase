@@ -37,13 +37,15 @@ def test_owner_start_has_direct_panel_button():
     callbacks={button["callback_data"] for row in keyboard for button in row}
     assert "settings" in callbacks
     assert "software_update" in callbacks
+    assert "پاسخ‌ها فقط از پیام‌های آرشیو گروه" in str(api.sent[-1][1])
 
 
 def test_panel_alias_opens_owner_settings():
     api=FakeAPI()
     app=TelegramBotApp(api=api,owner_id=42,services=FakeServices(),state=FakeState(),config=TelegramConfig())
     app._handle_command(42,42,True,"/panel")
-    assert "تنظیمات مالک" in api.sent[-1][1]
+    assert "پنل مالک" in str(api.sent[-1][1])
+    assert "پاسخ کاربران فقط از شواهد آرشیو گروه" in str(api.sent[-1][1])
 
 
 def test_runtime_registers_owner_scoped_command_menu_without_affecting_startup():
