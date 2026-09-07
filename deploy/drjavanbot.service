@@ -2,13 +2,14 @@
 Description=DrJavanBot Telegram archive Q&A
 After=network-online.target
 Wants=network-online.target
+
 [Service]
 Type=simple
 User=drjavanbot
 Group=drjavanbot
-WorkingDirectory=/opt/drjavanbot/app
+WorkingDirectory=/opt/drjavanbot/current
 EnvironmentFile=/etc/drjavanbot/drjavanbot.env
-ExecStart=/opt/drjavanbot/venv/bin/drjavanbot-bot
+ExecStart=/opt/drjavanbot/current/.venv/bin/drjavanbot-bot
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=120
@@ -23,5 +24,6 @@ ReadWritePaths=/var/lib/drjavanbot /var/cache/drjavanbot
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
 [Install]
 WantedBy=multi-user.target
