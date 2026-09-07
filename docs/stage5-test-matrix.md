@@ -1,0 +1,2 @@
+# Stage 5 verification matrix
+Covers config, parser, normalization, search/context/reply, reindex, cache, mock AI, fake citations, Telegram mocks, owner/API-key lifecycle, provider failures, concurrency and end-to-end mock flow. Stage-5 local hardening tests specifically cover atomic rate-limit concurrency, leased update restart semantics, failed-update polling acknowledgement, malformed callbacks and Telegram HTML plain fallback. Full 247-page corpus timing and real Telegram/AvalAI network checks must be run in Stage 6 and reported as actual outputs.

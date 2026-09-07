@@ -7,6 +7,8 @@ import sqlite3
 import time
 
 VALID_ACCESS_MODES = {"owner_only", "allowlist", "public"}
+_UPDATE_LEASE_SECONDS = 180.0
+_STATE_RETENTION_SECONDS = 7 * 24 * 3600
 
 @dataclass(frozen=True, slots=True)
 class BotUsageSummary:
@@ -75,17 +77,49 @@ class BotStateStore:
         now = time.time() if now is None else now
         cutoff = now - 60.0
         limit = self.rate_limit_per_minute()
-        with self._connect() as con:
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
             con.execute("DELETE FROM rate_events WHERE created_at<?", (cutoff,))
             count = int(con.execute("SELECT count(*) FROM rate_events WHERE user_id=? AND created_at>=?", (user_id, cutoff)).fetchone()[0])
-            if count >= limit: return False
+            if count >= limit:
+                con.rollback(); return False
             con.execute("INSERT INTO rate_events(user_id,created_at) VALUES(?,?)", (user_id, now))
-            return True
+            con.commit(); return True
+        finally:
+            con.close()
 
     def mark_update_once(self, update_id: int) -> bool:
         with self._connect() as con:
             cur = con.execute("INSERT OR IGNORE INTO processed_updates(update_id,created_at) VALUES(?,?)", (int(update_id), time.time()))
             return cur.rowcount == 1
+
+    def claim_update(self, update_id: int, *, now: float | None = None, lease_seconds: float = _UPDATE_LEASE_SECONDS) -> bool:
+        now = time.time() if now is None else now
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT status,lease_until FROM update_claims WHERE update_id=?", (int(update_id),)).fetchone()
+            if row is None:
+                con.execute("INSERT INTO update_claims(update_id,status,lease_until,updated_at) VALUES(?,?,?,?)", (int(update_id), "processing", now + lease_seconds, now))
+                con.commit(); return True
+            status, lease_until = str(row[0]), float(row[1] or 0)
+            if status == "done" or lease_until > now:
+                con.rollback(); return False
+            con.execute("UPDATE update_claims SET status='processing',lease_until=?,updated_at=? WHERE update_id=?", (now + lease_seconds, now, int(update_id)))
+            con.commit(); return True
+        finally:
+            con.close()
+
+    def complete_update(self, update_id: int, *, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        with self._connect() as con:
+            con.execute("INSERT INTO update_claims(update_id,status,lease_until,updated_at) VALUES(?,?,0,?) ON CONFLICT(update_id) DO UPDATE SET status='done',lease_until=0,updated_at=excluded.updated_at", (int(update_id), "done", now))
+            self._prune_transient(con, now)
+
+    def release_update(self, update_id: int) -> None:
+        with self._connect() as con:
+            con.execute("DELETE FROM update_claims WHERE update_id=? AND status='processing'", (int(update_id),))
 
     def begin_flow(self, user_id: int, flow: str, ttl_seconds: int) -> None:
         with self._connect() as con:
@@ -104,8 +138,7 @@ class BotStateStore:
 
     def record_question(self, user_id: int, *, success: bool, latency_ms: float, cache_hit: bool, ai_calls: int, error_class: str | None = None) -> None:
         with self._connect() as con:
-            con.execute("INSERT INTO question_usage(created_at,user_id,success,latency_ms,cache_hit,ai_calls,error_class) VALUES(?,?,?,?,?,?,?)",
-                        (time.time(), user_id, int(success), float(latency_ms), int(cache_hit), int(ai_calls), error_class))
+            con.execute("INSERT INTO question_usage(created_at,user_id,success,latency_ms,cache_hit,ai_calls,error_class) VALUES(?,?,?,?,?,?,?)", (time.time(), user_id, int(success), float(latency_ms), int(cache_hit), int(ai_calls), error_class))
 
     def usage_summary(self) -> BotUsageSummary:
         with self._connect() as con:
@@ -125,26 +158,38 @@ class BotStateStore:
             if row is None or int(row[2]) != int(user_id): return None
             if float(row[1]) <= time.time():
                 con.execute("DELETE FROM source_sessions WHERE session_id=?", (session_id,)); return None
-            return list(json.loads(row[0]))
+            try:
+                payload = json.loads(row[0])
+            except (TypeError, json.JSONDecodeError):
+                con.execute("DELETE FROM source_sessions WHERE session_id=?", (session_id,)); return None
+            return list(payload) if isinstance(payload, list) else None
 
-    def last_reindex_at(self) -> str | None:
-        return self.get_setting("last_reindex_at")
-
-    def set_last_reindex_at(self, value: str) -> None:
-        self.set_setting("last_reindex_at", value)
-
+    def last_reindex_at(self) -> str | None: return self.get_setting("last_reindex_at")
+    def set_last_reindex_at(self, value: str) -> None: self.set_setting("last_reindex_at", value)
     def provider_auth_failed(self) -> bool: return self.get_setting("provider_auth") == "failed"
     def set_provider_auth_failed(self, failed: bool) -> None: self.set_setting("provider_auth", "failed" if failed else "ok")
+
+    def _prune_transient(self, con: sqlite3.Connection, now: float) -> None:
+        cutoff = now - _STATE_RETENTION_SECONDS
+        con.execute("DELETE FROM update_claims WHERE status='done' AND updated_at<?", (cutoff,))
+        con.execute("DELETE FROM processed_updates WHERE created_at<?", (cutoff,))
+        con.execute("DELETE FROM rate_events WHERE created_at<?", (now - 60.0,))
+        con.execute("DELETE FROM source_sessions WHERE expires_at<=?", (now,))
+        con.execute("DELETE FROM owner_flows WHERE expires_at<=?", (now,))
 
     def _ensure_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as con:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
             con.executescript("""
             CREATE TABLE IF NOT EXISTS bot_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS allowed_users(user_id INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS rate_events(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,created_at REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_rate_events_user_time ON rate_events(user_id,created_at);
             CREATE TABLE IF NOT EXISTS processed_updates(update_id INTEGER PRIMARY KEY,created_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS update_claims(update_id INTEGER PRIMARY KEY,status TEXT NOT NULL CHECK(status IN ('processing','done')),lease_until REAL NOT NULL DEFAULT 0,updated_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_update_claims_status_time ON update_claims(status,updated_at);
             CREATE TABLE IF NOT EXISTS owner_flows(user_id INTEGER PRIMARY KEY,flow TEXT NOT NULL,expires_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS question_usage(id INTEGER PRIMARY KEY,created_at REAL NOT NULL,user_id INTEGER NOT NULL,success INTEGER NOT NULL,latency_ms REAL NOT NULL,cache_hit INTEGER NOT NULL,ai_calls INTEGER NOT NULL,error_class TEXT);
             CREATE TABLE IF NOT EXISTS source_sessions(session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,payload_json TEXT NOT NULL,expires_at REAL NOT NULL);
