@@ -15,6 +15,7 @@ Owner private Telegram /settings
   -> fetch origin/main (never live git pull)
   -> require fast-forward ancestry from active release
   -> create/verify /opt/drjavanbot/releases/<sha> worktree + release-specific .venv
+  -> install locked dependencies with persistent pip cache + bounded network retry
   -> compile + full pytest with isolated TMPDIR and explicit --basetemp
   -> build complete staging archive index while the current bot remains online
   -> health + local smoke + Telegram getMe against staging
@@ -29,6 +30,16 @@ Owner private Telegram /settings
 
 The Telegram process never runs sudo, git, pip or arbitrary shell commands. It can only write a schema-validated `update` or `rollback` request. Repository URL, branch, service name and deployment paths are fixed in root-owned code.
 
+## Dependency-download resilience
+
+Release preparation happens **before** the active bot is stopped. Python dependencies are installed from the checked-in lock files into the candidate release virtualenv. `requirements-dev.lock` already includes `requirements.lock`, so the updater performs one locked network install rather than downloading the runtime dependency set twice, then installs the local project with `--no-deps`.
+
+The updater sets an explicit 60-second pip network read timeout, bounded pip retries, a bounded outer retry, noninteractive mode and a persistent root-only cache at `/var/cache/drjavanbot/pip`. A slow or temporarily interrupted package mirror therefore gets another bounded chance without switching `current` or stopping production. Retry status is written to the normal updater progress file so the Owner can see that dependency download—not tests or the bot—is waiting.
+
+These retries are deliberately finite. A persistent package-index outage still fails closed while the old release remains active. The systemd updater timeout remains the outer deployment ceiling.
+
+A subtle deployment property is intentional: an update is executed by the updater code in the **currently active** release. Therefore improvements to updater code become effective after that new release has successfully activated. A failure that occurs while an older updater is preparing its first candidate does not retroactively gain newer retry logic; retrying after a transient network recovery may succeed, otherwise a one-time bootstrap/recovery may be needed to cross that version boundary.
+
 ## Automatic update discovery
 
 The running bot checks the public GitHub `main` SHA once at process startup and then every 300 seconds by default (`DRJAVAN_TG_UPDATE_CHECK_INTERVAL_SECONDS=300`). If a newer SHA exists, the Owner receives one notification for that SHA with **Test & Install** and updater-status buttons. Duplicate periodic notifications for the same SHA are suppressed.
@@ -37,7 +48,7 @@ An explicit Owner `/start` also refreshes the GitHub check immediately. Discover
 
 ## Progress and stale-request recovery
 
-While the root updater is active it writes safe, Owner-readable progress to `result.json` (fetch, release preparation, tests, staging index, switch, service start). The Software Update panel therefore shows `running` plus the current stage instead of remaining indefinitely at `pending`.
+While the root updater is active it writes safe, Owner-readable progress to `result.json` (fetch, release preparation/dependency retry, tests, staging index, switch, service start). The Software Update panel therefore shows `running` plus the current stage instead of remaining indefinitely at `pending`.
 
 `drjavanbot-updater.service` has a finite 30-minute systemd timeout. A request that remains without a live updater heartbeat for more than 45 minutes is shown as `stalled`; a subsequent Owner request may replace that stale request. This prevents a dead request file from permanently blocking future updates.
 
@@ -67,6 +78,7 @@ Systemd unit-file changes themselves are privileged deployment changes and requi
 - each release has its own `.venv`
 - persistent DB/state/secrets: `/var/lib/drjavanbot`
 - cache: `/var/cache/drjavanbot`
+- pip package cache: `/var/cache/drjavanbot/pip`
 - request/result/history: `/var/lib/drjavanbot/update`
 - bot service: `drjavanbot.service`
 - updater: `drjavanbot-updater.service` + `drjavanbot-updater.path`
