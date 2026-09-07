@@ -9,6 +9,7 @@ import tempfile
 import pytest
 
 from drjavanbot.ai import AIConfig, ArchiveAnswerService, ResponseCache, TelemetryStore
+from drjavanbot.ai.config import classify_question
 from drjavanbot.ai.evidence import assess_retrieval, build_evidence_pack
 from drjavanbot.ai.models import ProviderResult, UsageMetrics
 from drjavanbot.ai.validation import CitationValidationError, ModelOutputError, parse_json_object, validate_answer_payload
@@ -38,6 +39,16 @@ def valid_answer(*, ids=(1, 2), refs=None, disagreements=None, confidence="high"
             "insufficient_evidence":insufficient,"safety_note_if_needed":None}
 
 
+def compact_answer(*, ids=(1, 2)):
+    return {
+        "direct_answer": "جمع‌بندی کوتاه",
+        "confidence": "medium",
+        "cited_message_ids": list(ids),
+        "source_refs": [],
+        "insufficient_evidence": False,
+    }
+
+
 class MemorySecretStore:
     def __init__(self, value="test-secret-123"): self.data = {AVALAI_API_KEY_SECRET: value} if value else {}
     def get_secret(self, name): return self.data.get(name)
@@ -64,8 +75,13 @@ class MockProvider:
 
 def test_default_token_budgets_are_bounded():
     cfg=AIConfig(); assert cfg.budget_for("RCT چیه").max_evidence_tokens==2500
+    assert cfg.budget_for("RCT چیه").max_output_tokens>=800
     b=cfg.budget_for("بهترین روش را مقایسه کن و اختلاف نظرات و تجربه ها و مزایا و معایب را کامل جمع بندی کن")
     assert b.max_evidence_tokens<=cfg.hard_evidence_tokens and b.max_messages<=cfg.hard_messages
+
+
+def test_colloquial_kodom_is_not_misclassified_as_simple_lookup():
+    assert classify_question("کدوم برند کامپوزیت خوبه؟") == "medium"
 
 
 def test_evidence_pack_caps_and_redacts_obvious_pii():
@@ -82,6 +98,14 @@ def test_one_call_normal_path():
     backend=MockBackend([candidate(1,"A","RCT الف"),candidate(2,"B","RCT ب")]); provider=MockProvider([json.dumps(valid_answer(),ensure_ascii=False)])
     answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
     assert answer.ai_calls==1 and not answer.expansion_used and len(provider.calls)==1 and provider.calls[0]["request_type"]=="synthesis"
+    assert answer.evidence_used_count==2 and answer.independent_authors_count==2
+
+
+def test_compact_valid_payload_is_accepted_and_counts_are_local():
+    backend=MockBackend([candidate(1,"A","RCT الف"),candidate(2,"B","RCT ب")]); provider=MockProvider([json.dumps(compact_answer(),ensure_ascii=False)])
+    answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
+    assert answer.direct_answer=="جمع‌بندی کوتاه"
+    assert answer.key_findings==() and answer.disagreements==()
     assert answer.evidence_used_count==2 and answer.independent_authors_count==2
 
 
@@ -158,13 +182,16 @@ def test_malformed_synthesis_retries_once_then_returns_safe_result():
         s=telemetry.summary()
         assert answer.insufficient_evidence and answer.ai_calls==2 and len(provider.calls)==2
         assert "دوباره" in answer.direct_answer and s.calls==2 and s.failures==2
+        assert provider.calls[1]["max_output_tokens"] > provider.calls[0]["max_output_tokens"]
 
 
-def test_malformed_synthesis_retry_can_recover():
+def test_malformed_synthesis_retry_can_recover_with_larger_budget():
     backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")])
     provider=MockProvider(["",json.dumps(valid_answer(),ensure_ascii=False)])
     answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
     assert answer.direct_answer=="جمع‌بندی مستند آرشیو" and answer.ai_calls==2 and len(provider.calls)==2
+    assert provider.calls[1]["max_output_tokens"] > provider.calls[0]["max_output_tokens"]
+    assert "RETRY INSTRUCTION" in provider.calls[1]["system_prompt"]
 
 
 def test_numeric_string_citation_ids_are_normalized_then_validated():
@@ -173,6 +200,13 @@ def test_numeric_string_citation_ids_are_normalized_then_validated():
     provider=MockProvider([json.dumps(payload,ensure_ascii=False)])
     answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
     assert answer.cited_message_ids==(1,2) and answer.evidence_used_count==2
+
+
+def test_scalar_citation_and_optional_lists_are_normalized_without_weakening_grounding():
+    pack=build_evidence_pack("RCT",[candidate(1,"A","RCT")],AIConfig())
+    payload={"direct_answer":"مستند","confidence":"medium","cited_message_ids":"1","source_refs":None,"insufficient_evidence":"false","key_findings":"یک یافته"}
+    answer=validate_answer_payload(payload,pack,question="RCT")
+    assert answer.cited_message_ids==(1,) and answer.key_findings==("یک یافته",)
 
 
 def test_punctuation_only_question_never_calls_search_or_ai():
