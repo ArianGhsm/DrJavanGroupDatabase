@@ -7,6 +7,7 @@ from drjavanbot.ai.cache_resilient import ResilientResponseCache
 from drjavanbot.ai.config import AIConfig
 from drjavanbot.ai.key_manager import AvalAIKeyManager
 from drjavanbot.ai.orchestrator import ArchiveAnswerService
+from drjavanbot.ai.planner_cache import SearchPlanCache
 from drjavanbot.ai.provider import AuthenticationError
 from drjavanbot.ai.provider_v4 import DeepSeekV4AvalAIClient
 from drjavanbot.ai.telemetry import TelemetryStore
@@ -20,7 +21,7 @@ from .update_control import UpdateControl
 
 class RuntimeServices:
     def __init__(self,*,archive_dir:Path,data_dir:Path,cache_dir:Path,secret_dir:Path,base_ai_config:AIConfig,state:BotStateStore):
-        self.archive_dir=archive_dir; self.data_dir=data_dir; self.db_path=data_dir/"archive.sqlite3"; self.state=state; self.base_ai_config=base_ai_config; self.secret_store=LocalFileSecretStore(secret_dir); self.cache=ResilientResponseCache(cache_dir/"ai_responses.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.telemetry=TelemetryStore(data_dir/"ai_usage.sqlite3"); self.updates=UpdateControl(data_dir); self._reindex_lock=threading.Lock(); self._reindex_lock_path=data_dir/"reindex.lock"
+        self.archive_dir=archive_dir; self.data_dir=data_dir; self.db_path=data_dir/"archive.sqlite3"; self.state=state; self.base_ai_config=base_ai_config; self.secret_store=LocalFileSecretStore(secret_dir); self.cache=ResilientResponseCache(cache_dir/"ai_responses.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.planner_cache=SearchPlanCache(cache_dir/"search_plans.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.telemetry=TelemetryStore(data_dir/"ai_usage.sqlite3"); self.updates=UpdateControl(data_dir); self._reindex_lock=threading.Lock(); self._reindex_lock_path=data_dir/"reindex.lock"
     def model(self):
         m=self.state.selected_model(self.base_ai_config.model); return m if m in ALLOWED_MODELS else self.base_ai_config.model
     def set_model(self,m):
@@ -41,7 +42,7 @@ class RuntimeServices:
         ok=DeepSeekV4AvalAIClient(self._ai_config()).validate_api_key(key); self.state.set_provider_auth_failed(not ok); return ok
     def answer(self,question):
         if not self.db_path.exists(): raise IndexNotReadyError("index database does not exist")
-        backend=SQLiteSearchBackend(self.db_path); config=self._ai_config(); service=ArchiveAnswerService(backend=backend,secret_store=self.secret_store,config=config,provider=DeepSeekV4AvalAIClient(config),cache=self.cache,telemetry=self.telemetry)
+        backend=SQLiteSearchBackend(self.db_path); config=self._ai_config(); service=ArchiveAnswerService(backend=backend,secret_store=self.secret_store,config=config,provider=DeepSeekV4AvalAIClient(config),cache=self.cache,planner_cache=self.planner_cache,telemetry=self.telemetry)
         try: result=service.answer(question)
         except AuthenticationError: self.state.set_provider_auth_failed(True); raise
         except sqlite3.OperationalError as exc:
@@ -60,8 +61,8 @@ class RuntimeServices:
         return out
     def health(self): return {"bot":"up","index":database_health(self.db_path),"ai_configured":self.ai_configured(),"provider_auth_failed":self.state.provider_auth_failed(),"model":self.model()}
     def stats(self):
-        idx=SQLiteSearchBackend(self.db_path).stats() if self.db_path.exists() else {}; return {"bot":self.state.usage_summary(),"ai":self.telemetry.summary(),"cache":self.cache.stats(),"index":idx,"model":self.model(),"access_mode":self.state.access_mode(),"rate_limit_per_minute":self.state.rate_limit_per_minute(),"last_reindex_at":self.state.last_reindex_at()}
-    def clear_cache(self): return self.cache.clear()
+        idx=SQLiteSearchBackend(self.db_path).stats() if self.db_path.exists() else {}; return {"bot":self.state.usage_summary(),"ai":self.telemetry.summary(),"cache":self.cache.stats(),"planner_cache":self.planner_cache.stats(),"index":idx,"model":self.model(),"access_mode":self.state.access_mode(),"rate_limit_per_minute":self.state.rate_limit_per_minute(),"last_reindex_at":self.state.last_reindex_at()}
+    def clear_cache(self): return self.cache.clear()+self.planner_cache.clear()
     def request_software_update(self): return self.updates.request("update")
     def request_rollback(self): return self.updates.request("rollback")
     def update_status(self): return self.updates.status()
@@ -77,7 +78,7 @@ class RuntimeServices:
                 try: fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB); locked=True
                 except BlockingIOError: return None
             except ImportError: pass
-            report=full_reindex(self.archive_dir,self.db_path); self.cache.clear(); self.state.set_last_reindex_at(datetime.now(timezone.utc).isoformat()); return report
+            report=full_reindex(self.archive_dir,self.db_path); self.cache.clear(); self.planner_cache.clear(); self.state.set_last_reindex_at(datetime.now(timezone.utc).isoformat()); return report
         finally:
             if handle is not None:
                 if locked:
