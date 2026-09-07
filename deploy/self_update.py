@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import pwd
 import shutil
 import sqlite3
 import subprocess
@@ -24,6 +25,7 @@ RESULT_FILE = UPDATE_DIR / "result.json"
 HISTORY_FILE = UPDATE_DIR / "history.json"
 LOCK_FILE = Path("/run/lock/drjavanbot-updater.lock")
 SERVICE = "drjavanbot.service"
+SERVICE_USER = "drjavanbot"
 EXPECTED_REPO = "ArianGhsm/DrJavanGroupDatabase"
 ALLOWED_REMOTES = {
     "https://github.com/ArianGhsm/DrJavanGroupDatabase.git",
@@ -50,6 +52,7 @@ def main() -> int:
             return 0
         request_id = request["request_id"]
         action = request["action"]
+        _progress(request_id, action, "درخواست دریافت شد؛ preflight در حال اجراست.", current_sha=_current_sha())
         try:
             if action == "update":
                 result = _update(request_id)
@@ -77,9 +80,10 @@ def _update(request_id: str) -> dict:
     _verify_control_repo()
     env = _load_env()
     _validate_runtime_env(env)
+    current = _current_sha()
+    _progress(request_id, "update", "GitHub main در حال fetch است.", current_sha=current)
     _run(["git", "-C", str(CONTROL_REPO), "fetch", "--prune", "origin", "main"], timeout=180)
     target = _run_text(["git", "-C", str(CONTROL_REPO), "rev-parse", "origin/main"]).strip()
-    current = _current_sha()
     if current == target:
         return _result("up_to_date", request_id, "update", current, target, "نسخه فعال همین حالا آخرین main است.")
 
@@ -92,40 +96,64 @@ def _update(request_id: str) -> dict:
         if ancestry.returncode != 0:
             raise UpdateFailure("origin/main is not a fast-forward descendant of the active release")
 
+    _progress(request_id, "update", "Release جدید و virtualenv در حال آماده‌سازی است.", current_sha=current, target_sha=target)
     release = _prepare_release(target)
     stage_root = UPDATE_DIR / f"stage-{target[:12]}"
     shutil.rmtree(stage_root, ignore_errors=True)
-    try:
-        _run_stage_gates(release, stage_root, env)
-    finally:
-        shutil.rmtree(stage_root, ignore_errors=True)
-
     previous = _active_release()
     db_path = Path(env["DRJAVAN_DATA_DIR"]) / "archive.sqlite3"
     backup = UPDATE_DIR / f"archive-before-{target[:12]}.sqlite3"
     db_existed_before = db_path.exists()
 
-    _run(["systemctl", "stop", SERVICE], timeout=180)
     try:
-        _backup_sqlite(db_path, backup)
-        _switch_current(release)
-        prod_env = dict(os.environ)
-        prod_env.update(env)
-        prod_env["DRJAVAN_ARCHIVE_DIR"] = str(CURRENT / "گروه دکتر جوان")
-        _run([str(CURRENT / ".venv/bin/drjavanbot"), "reindex"], cwd=CURRENT, env=prod_env, timeout=900)
-        _run(["systemctl", "start", SERVICE], timeout=180)
-        _wait_active(stable_seconds=4)
-        _run([str(CURRENT / ".venv/bin/drjavanbot-smoke")], cwd=CURRENT, env=prod_env, timeout=120)
-        if env.get("TELEGRAM_BOT_TOKEN"):
-            _run([str(CURRENT / ".venv/bin/drjavanbot-smoke"), "--telegram"], cwd=CURRENT, env=prod_env, timeout=120)
-        _wait_active(stable_seconds=2)
-    except Exception:
-        _run(["systemctl", "stop", SERVICE], timeout=180, check=False)
-        if previous is not None and previous.exists():
-            _switch_current(previous)
-        _restore_sqlite(backup, db_path, existed_before=db_existed_before)
-        _run(["systemctl", "start", SERVICE], timeout=180, check=False)
-        raise
+        stage_db = _run_stage_gates(
+            release,
+            stage_root,
+            env,
+            request_id=request_id,
+            current_sha=current,
+            target_sha=target,
+        )
+        # systemd runs the bot as the unprivileged drjavanbot user. The updater
+        # itself uses UMask=0077, so explicitly publish a read/execute-only
+        # release before switching the current symlink.
+        _make_release_runtime_readable(release)
+        _progress(
+            request_id,
+            "update",
+            "همه gateها پاس شدند؛ توقف کوتاه سرویس و atomic switch در حال انجام است.",
+            current_sha=current,
+            target_sha=target,
+        )
+
+        _run(["systemctl", "stop", SERVICE], timeout=180)
+        try:
+            _backup_sqlite(db_path, backup)
+            _switch_current(release)
+            # The candidate DB was already built and health-checked while the old
+            # bot was still serving. Promote it instead of doing a second full
+            # reindex during downtime.
+            _promote_sqlite(stage_db, db_path)
+            prod_env = dict(os.environ)
+            prod_env.update(env)
+            prod_env["DRJAVAN_ARCHIVE_DIR"] = str(CURRENT / "گروه دکتر جوان")
+            _progress(request_id, "update", "Release فعال شد؛ سرویس در حال start است.", current_sha=current, target_sha=target)
+            _run(["systemctl", "start", SERVICE], timeout=180)
+            _wait_active(stable_seconds=4)
+            _run([str(CURRENT / ".venv/bin/drjavanbot-smoke")], cwd=CURRENT, env=prod_env, timeout=120)
+            if env.get("TELEGRAM_BOT_TOKEN"):
+                _run([str(CURRENT / ".venv/bin/drjavanbot-smoke"), "--telegram"], cwd=CURRENT, env=prod_env, timeout=120)
+            _wait_active(stable_seconds=2)
+        except Exception:
+            _run(["systemctl", "stop", SERVICE], timeout=180, check=False)
+            if previous is not None and previous.exists():
+                _make_release_runtime_readable(previous)
+                _switch_current(previous)
+            _restore_sqlite(backup, db_path, existed_before=db_existed_before)
+            _run(["systemctl", "start", SERVICE], timeout=180, check=False)
+            raise
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
 
     if current:
         _append_history(current)
@@ -146,10 +174,12 @@ def _rollback(request_id: str) -> dict:
         raise UpdateFailure("no previous healthy release is available")
     target = candidates[0]
     release = RELEASES / target
+    _make_release_runtime_readable(release)
     db_path = Path(env["DRJAVAN_DATA_DIR"]) / "archive.sqlite3"
     backup = UPDATE_DIR / f"archive-before-rollback-{int(time.time())}.sqlite3"
     db_existed_before = db_path.exists()
 
+    _progress(request_id, "rollback", "Rollback در حال آماده‌سازی است.", current_sha=current, target_sha=target)
     _run(["systemctl", "stop", SERVICE], timeout=180)
     previous = _active_release()
     try:
@@ -159,6 +189,7 @@ def _rollback(request_id: str) -> dict:
         prod_env.update(env)
         prod_env["DRJAVAN_ARCHIVE_DIR"] = str(CURRENT / "گروه دکتر جوان")
         _run([str(CURRENT / ".venv/bin/drjavanbot"), "reindex"], cwd=CURRENT, env=prod_env, timeout=900)
+        _make_database_service_owned(db_path)
         _run(["systemctl", "start", SERVICE], timeout=180)
         _wait_active(stable_seconds=4)
         _run([str(CURRENT / ".venv/bin/drjavanbot-smoke")], cwd=CURRENT, env=prod_env, timeout=120)
@@ -166,6 +197,7 @@ def _rollback(request_id: str) -> dict:
     except Exception:
         _run(["systemctl", "stop", SERVICE], timeout=180, check=False)
         if previous is not None and previous.exists():
+            _make_release_runtime_readable(previous)
             _switch_current(previous)
         _restore_sqlite(backup, db_path, existed_before=db_existed_before)
         _run(["systemctl", "start", SERVICE], timeout=180, check=False)
@@ -176,7 +208,15 @@ def _rollback(request_id: str) -> dict:
     return _result("rolled_back", request_id, "rollback", current, target, "آخرین release سالم قبلی فعال شد.")
 
 
-def _run_stage_gates(release: Path, stage_root: Path, env: dict[str, str]) -> None:
+def _run_stage_gates(
+    release: Path,
+    stage_root: Path,
+    env: dict[str, str],
+    *,
+    request_id: str | None = None,
+    current_sha: str | None = None,
+    target_sha: str | None = None,
+) -> Path:
     stage_data = stage_root / "data"
     stage_cache = stage_root / "cache"
     stage_tmp = stage_root / "tmp"
@@ -196,17 +236,30 @@ def _run_stage_gates(release: Path, stage_root: Path, env: dict[str, str]) -> No
     })
 
     python = release / ".venv/bin/python"
+    if request_id:
+        _progress(request_id, "update", "Compile و pytest در release موقت در حال اجراست.", current_sha=current_sha, target_sha=target_sha)
     _run([str(python), "-m", "compileall", "-q", "src", "deploy"], cwd=release, env=test_env, timeout=120)
     _run([str(python), "-m", "pytest", "-q", "--basetemp", str(stage_pytest)], cwd=release, env=test_env, timeout=600)
+    if request_id:
+        _progress(request_id, "update", "ایندکس کامل staging در حال ساخت است؛ سرویس فعلی هنوز روشن است.", current_sha=current_sha, target_sha=target_sha)
     _run([str(release / ".venv/bin/drjavanbot"), "reindex"], cwd=release, env=test_env, timeout=900)
     _run([str(release / ".venv/bin/drjavanbot"), "health"], cwd=release, env=test_env, timeout=120)
     _run([str(release / ".venv/bin/drjavanbot-smoke")], cwd=release, env=test_env, timeout=120)
     if env.get("TELEGRAM_BOT_TOKEN"):
         _run([str(release / ".venv/bin/drjavanbot-smoke"), "--telegram"], cwd=release, env=test_env, timeout=120)
+    stage_db = stage_data / "archive.sqlite3"
+    if not stage_db.is_file():
+        raise UpdateFailure("staging reindex did not produce archive.sqlite3")
+    return stage_db
 
 
 def _prepare_release(sha: str) -> Path:
     RELEASES.mkdir(parents=True, exist_ok=True)
+    os.chmod(RELEASES, 0o755)
+    try:
+        os.chmod(CURRENT.parent, 0o755)
+    except OSError:
+        pass
     release = RELEASES / sha
     if release.exists() and not _release_matches_sha(release, sha):
         _run(["git", "-C", str(CONTROL_REPO), "worktree", "remove", "--force", str(release)], check=False, timeout=120)
@@ -230,13 +283,53 @@ def _prepare_release(sha: str) -> Path:
         shutil.rmtree(venv, ignore_errors=True)
         _run([python_exe, "-m", "venv", str(venv)], timeout=180)
     pip_python = venv / "bin/python"
-    # Reconcile dependencies even for a reused candidate release. This repairs interrupted installs.
     _run([str(pip_python), "-m", "pip", "install", "-r", "requirements.lock"], cwd=release, timeout=600)
     _run([str(pip_python), "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release, timeout=600)
     _run([str(pip_python), "-m", "pip", "install", "--no-deps", "."], cwd=release, timeout=300)
     (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
     os.chmod(release / ".deploy_commit", 0o644)
     return release
+
+
+def _make_release_runtime_readable(release: Path) -> None:
+    """Publish a root-owned, non-writable release readable by the service user."""
+    if not release.is_dir():
+        raise UpdateFailure("release directory is missing before activation")
+    try:
+        os.chmod(CURRENT.parent, 0o755)
+        os.chmod(RELEASES, 0o755)
+    except OSError as exc:
+        raise UpdateFailure("unable to make release parents traversable") from exc
+
+    for root, dirs, files in os.walk(release, followlinks=False):
+        root_path = Path(root)
+        os.chmod(root_path, 0o755)
+        try:
+            os.chown(root_path, 0, 0)
+        except PermissionError as exc:
+            raise UpdateFailure("updater must run as root to publish releases") from exc
+        for name in dirs:
+            path = root_path / name
+            if path.is_symlink():
+                try:
+                    os.lchown(path, 0, 0)
+                except OSError:
+                    pass
+        for name in files:
+            path = root_path / name
+            if path.is_symlink():
+                try:
+                    os.lchown(path, 0, 0)
+                except OSError:
+                    pass
+                continue
+            mode = path.stat().st_mode
+            os.chmod(path, 0o755 if mode & 0o111 else 0o644)
+            os.chown(path, 0, 0)
+
+    bot = release / ".venv/bin/drjavanbot-bot"
+    if not bot.is_file() or not os.access(bot, os.X_OK):
+        raise UpdateFailure("release entrypoint is not executable after permission hardening")
 
 
 def _release_matches_sha(release: Path, sha: str) -> bool:
@@ -367,6 +460,27 @@ def _switch_current(release: Path) -> None:
     _fsync_directory(CURRENT.parent)
 
 
+def _service_ids() -> tuple[int, int]:
+    try:
+        account = pwd.getpwnam(SERVICE_USER)
+    except KeyError as exc:
+        raise UpdateFailure("drjavanbot Unix user is missing") from exc
+    return account.pw_uid, account.pw_gid
+
+
+def _make_database_service_owned(path: Path) -> None:
+    if not path.exists():
+        return
+    uid, gid = _service_ids()
+    os.chown(path, uid, gid)
+    os.chmod(path, 0o600)
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.exists():
+            os.chown(sidecar, uid, gid)
+            os.chmod(sidecar, 0o600)
+
+
 def _backup_sqlite(src: Path, dst: Path) -> None:
     dst.unlink(missing_ok=True)
     if not src.exists():
@@ -381,6 +495,32 @@ def _backup_sqlite(src: Path, dst: Path) -> None:
     os.chmod(dst, 0o600)
 
 
+def _promote_sqlite(src: Path, dst: Path) -> None:
+    if not src.is_file():
+        raise UpdateFailure("staging archive database is missing")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".archive.promote.", suffix=".sqlite3", dir=dst.parent)
+    os.close(fd)
+    temp = Path(temp_name)
+    try:
+        source = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        target = sqlite3.connect(temp)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(str(dst) + suffix).unlink(missing_ok=True)
+        uid, gid = _service_ids()
+        os.chown(temp, uid, gid)
+        os.chmod(temp, 0o600)
+        os.replace(temp, dst)
+        _fsync_directory(dst.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def _restore_sqlite(backup: Path, dst: Path, *, existed_before: bool) -> None:
     for suffix in ("", "-wal", "-shm", "-journal"):
         Path(str(dst) + suffix).unlink(missing_ok=True)
@@ -390,6 +530,7 @@ def _restore_sqlite(backup: Path, dst: Path, *, existed_before: bool) -> None:
         raise UpdateFailure("SQLite backup is missing during rollback")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup, dst)
+    _make_database_service_owned(dst)
 
 
 def _wait_active(*, stable_seconds: float = 4.0) -> None:
@@ -444,6 +585,20 @@ def _cleanup_releases(*, keep: set[str | None]) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _progress(
+    request_id: str,
+    action: str,
+    message: str,
+    *,
+    current_sha: str | None = None,
+    target_sha: str | None = None,
+) -> None:
+    _atomic_json(
+        RESULT_FILE,
+        _result("running", request_id, action, current_sha, target_sha, message),
+    )
+
+
 def _result(state: str, request_id: str, action: str, current_sha: str | None, target_sha: str | None, message: str) -> dict:
     return {
         "schema": 1,
@@ -466,6 +621,11 @@ def _atomic_json(path: Path, value) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temp, 0o600)
+        try:
+            uid, gid = _service_ids()
+            os.chown(temp, uid, gid)
+        except UpdateFailure:
+            pass
         os.replace(temp, path)
         _fsync_directory(path.parent)
     finally:
