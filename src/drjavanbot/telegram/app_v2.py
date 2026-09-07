@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import logging
-
 from .app import TelegramBotApp as CoreTelegramBotApp
 from .rendering import html_escape, inline_keyboard
 
-_LOG = logging.getLogger(__name__)
 _UPDATE_CALLBACKS = {
     "software_update",
     "software_update_confirm",
@@ -15,7 +12,7 @@ _UPDATE_CALLBACKS = {
 
 
 class TelegramBotApp(CoreTelegramBotApp):
-    """Stage-7 owner updater UI layered over the stable Telegram handler."""
+    """Owner updater UI layered over the stable Telegram handler."""
 
     def _handle_command(self, chat_id: int, user_id: int, is_private: bool, text: str) -> None:
         command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
@@ -66,7 +63,7 @@ class TelegramBotApp(CoreTelegramBotApp):
                 chat_id,
                 message_id,
                 text,
-                reply_markup=inline_keyboard([["dummy"]]) if False else inline_keyboard([[("وضعیت", "software_update")]]),
+                reply_markup=inline_keyboard([[("وضعیت", "software_update")]]),
             )
             return
         if data == "software_rollback":
