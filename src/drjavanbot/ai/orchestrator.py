@@ -12,6 +12,7 @@ from drjavanbot.search import SearchBackend
 from drjavanbot.secrets import AVALAI_API_KEY_SECRET, SecretStore
 from .cache import ResponseCache
 from .config import AIConfig
+from .corpus import sqlite_corpus_hints
 from .evidence import build_evidence_pack
 from .models import AnswerResult, ProviderResult
 from .planner import (
@@ -256,18 +257,24 @@ def _validate_synthesis_content(content: str, pack, question: str) -> AnswerResu
 
 
 def _corpus_hints(backend: SearchBackend, plan: SearchPlan, observed: tuple[str, ...]) -> tuple[str, ...]:
-    """Use real local vocabulary when a backend exposes it; never treat hints as evidence."""
-    provider = getattr(backend, "corpus_hints", None)
-    if not callable(provider):
-        return observed[:24]
+    """Use vocabulary from the current local index; search hints are never evidence."""
     seeds = tuple(dict.fromkeys((*plan.core_concepts, *plan.aliases, *observed[:12])))
+    provider = getattr(backend, "corpus_hints", None)
     try:
-        values = provider(seeds, limit=24)
+        if callable(provider):
+            values = provider(seeds, limit=24)
+        else:
+            values = sqlite_corpus_hints(backend, seeds, limit=24)
     except Exception:
-        return observed[:24]
+        values = ()
+
+    # Preserve observed top-candidate vocabulary as a fail-soft fallback and
+    # merge it with broader corpus co-occurrence terms. None of these strings is
+    # placed in the evidence pack unless a subsequent local search retrieves an
+    # actual archive message containing it.
     out: list[str] = []
     seen: set[str] = set()
-    for value in values or ():
+    for value in (*tuple(values or ()), *observed):
         text = str(value).strip()
         key = normalize_text(text)
         if text and key and key not in seen:
