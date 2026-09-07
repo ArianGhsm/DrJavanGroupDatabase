@@ -22,6 +22,7 @@ from .planner import (
     observed_vocabulary,
     parse_refinement_families,
     parse_search_plan,
+    plan_requires_deep_retrieval,
 )
 from .planner_cache import SearchPlanCache
 from .prompts import (
@@ -39,7 +40,11 @@ from .retrieval import assess_planned_retrieval, retrieve_with_plan
 from .telemetry import TelemetryStore
 from .validation import CitationValidationError, ModelOutputError, parse_json_object, validate_answer_payload
 
-MAX_LOGICAL_AI_CALLS = 3
+# Planner + answerability/refinement + synthesis + one structured repair. This is
+# a hard application-level ceiling, not an invitation to loop. The previous cap
+# of three forced faceted questions to choose between better retrieval and a
+# safe synthesis repair; four preserves both while remaining tightly bounded.
+MAX_LOGICAL_AI_CALLS = 4
 ProgressCallback = Callable[[str, dict[str, object]], None]
 
 
@@ -52,7 +57,7 @@ class AIProvider(Protocol):
 
 
 class ArchiveAnswerService:
-    """AI planning -> local multi-query retrieval -> bounded refinement -> grounded synthesis."""
+    """AI planning -> faceted local retrieval -> bounded rescue -> grounded synthesis."""
 
     def __init__(
         self,
@@ -78,9 +83,9 @@ class ArchiveAnswerService:
 
         ``progress`` is intentionally *not* a reasoning/chain-of-thought channel.
         Events contain stage names and bounded operational counts only: number of
-        search families, retrieved messages, authors, context windows and evidence
-        items. Prompts, model reasoning, hidden analysis and unvalidated archive
-        text are never emitted through this callback.
+        search families, retrieved messages, authors, bridged discussion windows
+        and evidence items. Prompts, model reasoning, hidden analysis and
+        unvalidated archive text are never emitted through this callback.
         """
         question = question.strip()
         normalized = normalize_text(question)
@@ -124,11 +129,6 @@ class ArchiveAnswerService:
                 )
                 plan = parsed
             except (ModelOutputError, CitationValidationError):
-                # Structured planner failure is not allowed to become a user-facing
-                # crash. The fallback contains only deterministic question tokens.
-                # Do not cache this degraded plan: a transient malformed model
-                # response must not pin the same question to fallback retrieval for
-                # the full planner-cache TTL.
                 plan = deterministic_fallback_plan(question)
                 planner_cacheable = False
             assert isinstance(plan, SearchPlan)
@@ -152,26 +152,40 @@ class ArchiveAnswerService:
         )
         report = retrieve_with_plan(self.backend, plan)
         _emit_retrieval_progress(progress, report, refined=False)
-        needs_refinement, _ = assess_planned_retrieval(report)
+        needs_refinement, retrieval_reason = assess_planned_retrieval(report)
 
-        # Reserve one logical call for final synthesis. The whole request has a
-        # hard ceiling of three AI calls, including malformed-output repair.
+        # A superficially strong topic match is not enough for a faceted question.
+        # E.g. many generic orthodontic posts do not prove we found the discussion
+        # that answers "at what age for children?". Such questions always get one
+        # bounded answerability/rescue pass, even when lexical scores look strong.
+        if plan_requires_deep_retrieval(plan):
+            needs_refinement = True
+            retrieval_reason = f"answer_facet_check:{retrieval_reason}"
+
         if needs_refinement and ai_calls < MAX_LOGICAL_AI_CALLS - 1:
             _emit_progress(
                 progress,
                 "refining",
                 candidate_count=len(report.candidates),
                 author_count=_candidate_author_count(report.candidates),
+                conversation_bridges=int(getattr(report, "conversation_bridges", 0)),
             )
             observed = observed_vocabulary(report.candidates, question=question)
             corpus_hints = _corpus_hints(self.backend, plan, observed)
+            diagnostics = _retrieval_diagnostics(report, retrieval_reason)
             ai_calls += 1
             try:
                 _, families = self._call_processed(
                     request_type="search_refinement",
                     api_key=api_key,
                     system_prompt=REFINEMENT_SYSTEM_PROMPT,
-                    user_prompt=refinement_user_prompt(question, plan, observed, corpus_hints),
+                    user_prompt=refinement_user_prompt(
+                        question,
+                        plan,
+                        observed,
+                        corpus_hints,
+                        retrieval_diagnostics=diagnostics,
+                    ),
                     max_output_tokens=self.config.refinement_max_output_tokens,
                     processor=parse_refinement_families,
                 )
@@ -238,8 +252,6 @@ class ArchiveAnswerService:
         try:
             _, answer = self._call_processed(**synthesis_kwargs)
         except (ModelOutputError, CitationValidationError):
-            # Retry only when a logical-call slot remains. A weak retrieval path
-            # already used planner+refinement and therefore never makes call #4.
             if ai_calls >= MAX_LOGICAL_AI_CALLS:
                 cacheable = False
                 _emit_progress(progress, "validation_failed", ai_calls=ai_calls)
@@ -268,7 +280,7 @@ class ArchiveAnswerService:
             answer,
             cache_hit=False,
             ai_calls=ai_calls,
-            expansion_used=refinement_used,  # backward-compatible runtime field
+            expansion_used=refinement_used,
             evidence_pack_estimated_tokens=pack.estimated_tokens,
         )
         if self.cache is not None and cacheable:
@@ -334,8 +346,6 @@ def _emit_progress(progress: ProgressCallback | None, stage: str, **details: obj
     try:
         progress(stage, dict(details))
     except Exception:
-        # Telegram/UI progress is observational only. It must never fail the
-        # evidence pipeline or trigger a duplicate provider/search operation.
         return
 
 
@@ -347,14 +357,29 @@ def _emit_retrieval_progress(progress: ProgressCallback | None, report, *, refin
         author_count=_candidate_author_count(report.candidates),
         context_hydrated=int(getattr(report, "context_hydrated", 0)),
         discussion_windows=int(getattr(report, "discussion_windows", 0)),
+        conversation_bridges=int(getattr(report, "conversation_bridges", 0)),
+        families_with_hits=int(getattr(report, "families_with_hits", 0)),
         refined=bool(refined),
     )
+
+
+def _retrieval_diagnostics(report, reason: str) -> dict[str, object]:
+    return {
+        "assessment": reason,
+        "candidate_count": len(report.candidates),
+        "author_count": _candidate_author_count(report.candidates),
+        "families_with_hits": int(getattr(report, "families_with_hits", 0)),
+        "hit_family_names": list(getattr(report, "hit_family_names", ())[:10]),
+        "context_hydrated": int(getattr(report, "context_hydrated", 0)),
+        "discussion_windows": int(getattr(report, "discussion_windows", 0)),
+        "conversation_bridges": int(getattr(report, "conversation_bridges", 0)),
+    }
 
 
 def _candidate_author_count(candidates) -> int:
     return len({
         candidate.message.author_normalized or candidate.message.author
-        for candidate in tuple(candidates)[:20]
+        for candidate in tuple(candidates)[:24]
         if candidate.message.author_normalized or candidate.message.author
     })
 
@@ -365,20 +390,16 @@ def _validate_synthesis_content(content: str, pack, question: str) -> AnswerResu
 
 def _corpus_hints(backend: SearchBackend, plan: SearchPlan, observed: tuple[str, ...]) -> tuple[str, ...]:
     """Use vocabulary from the current local index; search hints are never evidence."""
-    seeds = tuple(dict.fromkeys((*plan.core_concepts, *plan.aliases, *observed[:12])))
+    seeds = tuple(dict.fromkeys((*plan.core_concepts, *plan.aliases, *plan.optional_concepts, *observed[:16])))
     provider = getattr(backend, "corpus_hints", None)
     try:
         if callable(provider):
-            values = provider(seeds, limit=24)
+            values = provider(seeds, limit=32)
         else:
-            values = sqlite_corpus_hints(backend, seeds, limit=24)
+            values = sqlite_corpus_hints(backend, seeds, limit=32)
     except Exception:
         values = ()
 
-    # Preserve observed top-candidate vocabulary as a fail-soft fallback and
-    # merge it with broader corpus co-occurrence terms. None of these strings is
-    # placed in the evidence pack unless a subsequent local search retrieves an
-    # actual archive message containing it.
     out: list[str] = []
     seen: set[str] = set()
     for value in (*tuple(values or ()), *observed):
@@ -387,7 +408,7 @@ def _corpus_hints(backend: SearchBackend, plan: SearchPlan, observed: tuple[str,
         if text and key and key not in seen:
             seen.add(key)
             out.append(text)
-        if len(out) >= 24:
+        if len(out) >= 32:
             break
     return tuple(out)
 
@@ -447,7 +468,7 @@ def _insufficient_answer(*, ai_calls: int, refinement_used: bool) -> AnswerResul
     return AnswerResult(
         direct_answer="در آرشیو پیام‌های بازیابی‌شده شواهد کافی برای پاسخ قابل اتکا پیدا نشد.",
         key_findings=(), disagreements=(), practical_conclusion=None,
-        confidence="low", confidence_reason="جست‌وجوی معنایی و محلی evidence کافی پیدا نکرد.",
+        confidence="low", confidence_reason="جست‌وجوی چندمرحله‌ای و context گفت‌وگو evidence کافی پیدا نکرد.",
         cited_message_ids=(), source_refs=(), evidence_used_count=0,
         independent_authors_count=0, insufficient_evidence=True,
         safety_note_if_needed=None,
