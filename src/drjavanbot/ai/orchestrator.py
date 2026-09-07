@@ -5,26 +5,40 @@ import hashlib
 import json
 from pathlib import Path
 import time
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Protocol
 
 from drjavanbot.normalization import normalize_text
-from drjavanbot.search import EvidenceCandidate, SearchBackend, SearchQuery
+from drjavanbot.search import SearchBackend
 from drjavanbot.secrets import AVALAI_API_KEY_SECRET, SecretStore
 from .cache import ResponseCache
 from .config import AIConfig
-from .evidence import assess_retrieval, build_evidence_pack
+from .evidence import build_evidence_pack
 from .models import AnswerResult, ProviderResult
+from .planner import (
+    PLANNER_VERSION,
+    SearchPlan,
+    deterministic_fallback_plan,
+    observed_vocabulary,
+    parse_refinement_families,
+    parse_search_plan,
+)
+from .planner_cache import SearchPlanCache
 from .prompts import (
     PROMPT_VERSION,
-    QUERY_EXPANSION_SYSTEM_PROMPT,
-    SYNTHESIS_SYSTEM_PROMPT,
+    REFINEMENT_SYSTEM_PROMPT,
+    SEARCH_PLANNER_SYSTEM_PROMPT,
     SYNTHESIS_RETRY_SUFFIX,
-    query_expansion_user_prompt,
+    SYNTHESIS_SYSTEM_PROMPT,
+    refinement_user_prompt,
+    search_planner_user_prompt,
     synthesis_user_prompt,
 )
 from .provider import AvalAIClient
+from .retrieval import assess_planned_retrieval, retrieve_with_plan
 from .telemetry import TelemetryStore
-from .validation import CitationValidationError, ModelOutputError, parse_json_object, parse_query_variants, validate_answer_payload
+from .validation import CitationValidationError, ModelOutputError, parse_json_object, validate_answer_payload
+
+MAX_LOGICAL_AI_CALLS = 3
 
 
 class AIConfigurationError(RuntimeError):
@@ -36,7 +50,7 @@ class AIProvider(Protocol):
 
 
 class ArchiveAnswerService:
-    """Question -> local retrieval -> optional expansion -> bounded evidence -> synthesis."""
+    """AI planning -> local multi-query retrieval -> bounded refinement -> grounded synthesis."""
 
     def __init__(
         self,
@@ -46,6 +60,7 @@ class ArchiveAnswerService:
         config: AIConfig,
         provider: AIProvider | None = None,
         cache: ResponseCache | None = None,
+        planner_cache: SearchPlanCache | None = None,
         telemetry: TelemetryStore | None = None,
     ) -> None:
         self.backend = backend
@@ -53,13 +68,14 @@ class ArchiveAnswerService:
         self.config = config
         self.provider = provider or AvalAIClient(config)
         self.cache = cache
+        self.planner_cache = planner_cache
         self.telemetry = telemetry
 
     def answer(self, question: str) -> AnswerResult:
         question = question.strip()
         normalized = normalize_text(question)
         if not normalized:
-            return _not_searchable_answer()
+            return _not_searchable_answer(ai_calls=0)
 
         index_version = _index_fingerprint(self.backend)
         cache_key = _cache_key(normalized, index_version, self.config)
@@ -68,90 +84,124 @@ class ArchiveAnswerService:
             if cached is not None:
                 return cached.with_runtime(cache_hit=True, ai_calls=0)
 
-        candidates = tuple(self.backend.search(SearchQuery(raw_query=question)))
-        needs_expansion, _ = assess_retrieval(candidates)
         api_key = self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
-        ai_calls = 0
-        expansion_used = False
+        if not api_key:
+            raise AIConfigurationError("AvalAI API key is not configured")
 
-        if needs_expansion:
-            if not api_key:
-                raise AIConfigurationError("AvalAI API key is not configured")
-            observed = _observed_terms(candidates)
+        ai_calls = 0
+        refinement_used = False
+        planner_key = _planner_cache_key(normalized, index_version, self.config)
+        plan = self.planner_cache.get(planner_key, question=question) if self.planner_cache is not None else None
+        if plan is None:
+            ai_calls += 1
             try:
-                _, variants = self._call_processed(
-                    request_type="expansion",
+                _, parsed = self._call_processed(
+                    request_type="search_plan",
                     api_key=api_key,
-                    system_prompt=QUERY_EXPANSION_SYSTEM_PROMPT,
-                    user_prompt=query_expansion_user_prompt(question, observed),
-                    max_output_tokens=self.config.expansion_max_output_tokens,
-                    processor=lambda content: parse_query_variants(content, original=question),
+                    system_prompt=SEARCH_PLANNER_SYSTEM_PROMPT,
+                    user_prompt=search_planner_user_prompt(question),
+                    max_output_tokens=self.config.planner_max_output_tokens,
+                    processor=lambda content: parse_search_plan(content, question=question),
+                )
+                plan = parsed
+            except (ModelOutputError, CitationValidationError):
+                # Structured planner failure is not allowed to become a user-facing
+                # crash. The fallback contains only deterministic question tokens.
+                plan = deterministic_fallback_plan(question)
+            assert isinstance(plan, SearchPlan)
+            if self.planner_cache is not None:
+                self.planner_cache.set(planner_key, plan)
+
+        if not plan.searchable:
+            answer = _not_searchable_answer(ai_calls=ai_calls)
+            if self.cache is not None:
+                self.cache.set(cache_key, answer)
+            return answer
+
+        report = retrieve_with_plan(self.backend, plan)
+        needs_refinement, _ = assess_planned_retrieval(report)
+
+        # Reserve one logical call for final synthesis. The whole request has a
+        # hard ceiling of three AI calls, including malformed-output repair.
+        if needs_refinement and ai_calls < MAX_LOGICAL_AI_CALLS - 1:
+            observed = observed_vocabulary(report.candidates, question=question)
+            corpus_hints = _corpus_hints(self.backend, plan, observed)
+            ai_calls += 1
+            try:
+                _, families = self._call_processed(
+                    request_type="search_refinement",
+                    api_key=api_key,
+                    system_prompt=REFINEMENT_SYSTEM_PROMPT,
+                    user_prompt=refinement_user_prompt(question, plan, observed, corpus_hints),
+                    max_output_tokens=self.config.refinement_max_output_tokens,
+                    processor=parse_refinement_families,
                 )
             except (ModelOutputError, CitationValidationError):
-                variants = ()
-            ai_calls += 1
-            if variants:
-                expansion_used = True
-                candidates = tuple(self.backend.search(SearchQuery(raw_query=question, variants=variants)))
+                families = ()
+            if families:
+                refinement_used = True
+                plan = plan.with_added_families(families)
+                report = retrieve_with_plan(self.backend, plan)
 
+        candidates = report.candidates
         if not candidates:
-            answer = _insufficient_answer(ai_calls=ai_calls, expansion_used=expansion_used)
+            answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used)
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
             return answer
 
         pack = build_evidence_pack(question, candidates, self.config)
         if not pack.messages:
-            answer = _insufficient_answer(ai_calls=ai_calls, expansion_used=expansion_used)
+            answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used)
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
             return answer
 
-        if not api_key:
-            api_key = self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
-        if not api_key:
-            raise AIConfigurationError("AvalAI API key is not configured")
+        if ai_calls >= MAX_LOGICAL_AI_CALLS:
+            return _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
 
         budget = self.config.budget_for(question)
         synthesis_kwargs = dict(
             request_type="synthesis",
             api_key=api_key,
             system_prompt=SYNTHESIS_SYSTEM_PROMPT,
-            user_prompt=synthesis_user_prompt(pack),
+            user_prompt=synthesis_user_prompt(pack, plan=plan),
             max_output_tokens=budget.max_output_tokens,
             processor=lambda content: _validate_synthesis_content(content, pack, question),
         )
         cacheable = True
+        ai_calls += 1
         try:
             _, answer = self._call_processed(**synthesis_kwargs)
-            ai_calls += 1
         except (ModelOutputError, CitationValidationError):
-            # A second call is allowed only for malformed/incomplete structured output.
-            # Unlike the old behavior, retrying does not repeat the same too-small cap.
-            ai_calls += 1
-            retry_tokens = max(
-                budget.max_output_tokens,
-                min(
-                    self.config.structured_retry_output_tokens,
-                    max(budget.max_output_tokens * 2, 1_200),
-                ),
-            )
-            retry_kwargs = dict(synthesis_kwargs)
-            retry_kwargs["system_prompt"] = SYNTHESIS_SYSTEM_PROMPT + SYNTHESIS_RETRY_SUFFIX
-            retry_kwargs["max_output_tokens"] = retry_tokens
-            try:
-                _, answer = self._call_processed(**retry_kwargs)
-                ai_calls += 1
-            except (ModelOutputError, CitationValidationError):
-                ai_calls += 1
+            # Retry only when a logical-call slot remains. A weak retrieval path
+            # already used planner+refinement and therefore never makes call #4.
+            if ai_calls >= MAX_LOGICAL_AI_CALLS:
                 cacheable = False
-                answer = _structured_output_failure_answer(ai_calls=ai_calls, expansion_used=expansion_used)
+                answer = _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
+            else:
+                retry_tokens = max(
+                    budget.max_output_tokens,
+                    min(
+                        self.config.structured_retry_output_tokens,
+                        max(budget.max_output_tokens * 2, 1_200),
+                    ),
+                )
+                retry_kwargs = dict(synthesis_kwargs)
+                retry_kwargs["system_prompt"] = SYNTHESIS_SYSTEM_PROMPT + SYNTHESIS_RETRY_SUFFIX
+                retry_kwargs["max_output_tokens"] = retry_tokens
+                ai_calls += 1
+                try:
+                    _, answer = self._call_processed(**retry_kwargs)
+                except (ModelOutputError, CitationValidationError):
+                    cacheable = False
+                    answer = _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
 
         answer = replace(
             answer,
             cache_hit=False,
             ai_calls=ai_calls,
-            expansion_used=expansion_used,
+            expansion_used=refinement_used,  # backward-compatible runtime field
             evidence_pack_estimated_tokens=pack.estimated_tokens,
         )
         if self.cache is not None and cacheable:
@@ -205,16 +255,27 @@ def _validate_synthesis_content(content: str, pack, question: str) -> AnswerResu
     return validate_answer_payload(parse_json_object(content), pack, question=question)
 
 
-def _observed_terms(candidates: Sequence[EvidenceCandidate]) -> tuple[str, ...]:
-    terms: list[str] = []
+def _corpus_hints(backend: SearchBackend, plan: SearchPlan, observed: tuple[str, ...]) -> tuple[str, ...]:
+    """Use real local vocabulary when a backend exposes it; never treat hints as evidence."""
+    provider = getattr(backend, "corpus_hints", None)
+    if not callable(provider):
+        return observed[:24]
+    seeds = tuple(dict.fromkeys((*plan.core_concepts, *plan.aliases, *observed[:12])))
+    try:
+        values = provider(seeds, limit=24)
+    except Exception:
+        return observed[:24]
+    out: list[str] = []
     seen: set[str] = set()
-    for candidate in candidates[:10]:
-        for term in candidate.matched_terms:
-            key = term.casefold()
-            if term and key not in seen:
-                seen.add(key)
-                terms.append(term)
-    return tuple(terms[:20])
+    for value in values or ():
+        text = str(value).strip()
+        key = normalize_text(text)
+        if text and key and key not in seen:
+            seen.add(key)
+            out.append(text)
+        if len(out) >= 24:
+            break
+    return tuple(out)
 
 
 def _index_fingerprint(backend: SearchBackend) -> str:
@@ -239,46 +300,42 @@ def _cache_key(normalized_question: str, index_version: str, config: AIConfig) -
     return hashlib.sha256(raw).hexdigest()
 
 
-def _not_searchable_answer() -> AnswerResult:
+def _planner_cache_key(normalized_question: str, index_version: str, config: AIConfig) -> str:
+    raw = "\n".join((normalized_question, index_version, PLANNER_VERSION, config.model)).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _not_searchable_answer(*, ai_calls: int) -> AnswerResult:
     return AnswerResult(
-        direct_answer="سؤال قابل جست‌وجویی در پیام شما پیدا نشد. لطفاً سؤال را با چند واژه مشخص بفرستید.",
+        direct_answer="سؤال قابل جست‌وجوی معناداری برای آرشیو پیدا نشد. لطفاً موضوع مشخص‌تری بفرستید.",
         key_findings=(), disagreements=(), practical_conclusion=None,
-        confidence="low", confidence_reason="عبارت جست‌وجوی معناداری وجود ندارد.",
+        confidence="low", confidence_reason="Search planner موضوع معناداری برای بازیابی آرشیو پیدا نکرد.",
         cited_message_ids=(), source_refs=(), evidence_used_count=0,
         independent_authors_count=0, insufficient_evidence=True,
-        safety_note_if_needed=None, cache_hit=False, ai_calls=0,
+        safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
         expansion_used=False, evidence_pack_estimated_tokens=0,
     )
 
 
-def _structured_output_failure_answer(*, ai_calls: int, expansion_used: bool) -> AnswerResult:
+def _structured_output_failure_answer(*, ai_calls: int, refinement_used: bool) -> AnswerResult:
     return AnswerResult(
         direct_answer="پاسخ ساختاری سرویس AI این بار معتبر نبود. لطفاً همان سؤال را دوباره بفرستید.",
         key_findings=(), disagreements=(), practical_conclusion=None,
-        confidence="low", confidence_reason="خروجی مدل پس از یک retry محدود قابل اعتبارسنجی نبود.",
+        confidence="low", confidence_reason="خروجی مدل در سقف محدود فراخوانی‌ها قابل اعتبارسنجی نبود.",
         cited_message_ids=(), source_refs=(), evidence_used_count=0,
         independent_authors_count=0, insufficient_evidence=True,
         safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
-        expansion_used=expansion_used, evidence_pack_estimated_tokens=0,
+        expansion_used=refinement_used, evidence_pack_estimated_tokens=0,
     )
 
 
-def _insufficient_answer(*, ai_calls: int, expansion_used: bool) -> AnswerResult:
+def _insufficient_answer(*, ai_calls: int, refinement_used: bool) -> AnswerResult:
     return AnswerResult(
         direct_answer="در آرشیو پیام‌های بازیابی‌شده شواهد کافی برای پاسخ قابل اتکا پیدا نشد.",
-        key_findings=(),
-        disagreements=(),
-        practical_conclusion=None,
-        confidence="low",
-        confidence_reason="بازیابی محلی پس از جست‌وجوی موجود، evidence کافی پیدا نکرد.",
-        cited_message_ids=(),
-        source_refs=(),
-        evidence_used_count=0,
-        independent_authors_count=0,
-        insufficient_evidence=True,
-        safety_note_if_needed=None,
-        cache_hit=False,
-        ai_calls=ai_calls,
-        expansion_used=expansion_used,
-        evidence_pack_estimated_tokens=0,
+        key_findings=(), disagreements=(), practical_conclusion=None,
+        confidence="low", confidence_reason="جست‌وجوی معنایی و محلی evidence کافی پیدا نکرد.",
+        cited_message_ids=(), source_refs=(), evidence_used_count=0,
+        independent_authors_count=0, insufficient_evidence=True,
+        safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
+        expansion_used=refinement_used, evidence_pack_estimated_tokens=0,
     )
