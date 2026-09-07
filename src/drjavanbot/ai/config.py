@@ -28,6 +28,11 @@ class AIConfig:
     retry_base_seconds: float = 0.4
     reasoning_effort: str = "low"
     cache_ttl_seconds: int = 86_400
+    # Search planning is deliberately much smaller than answer synthesis.
+    planner_max_output_tokens: int = 320
+    refinement_max_output_tokens: int = 220
+    # Legacy field kept for config/backward compatibility; production semantic
+    # retrieval no longer uses flat query expansion.
     expansion_max_output_tokens: int = 180
     simple_evidence_tokens: int = 2_500
     medium_evidence_tokens: int = 5_000
@@ -37,8 +42,6 @@ class AIConfig:
     medium_messages: int = 26
     complex_messages: int = 40
     hard_messages: int = 40
-    # These are generation ceilings, not prepaid token usage. They are sized so
-    # the JSON envelope cannot be truncated merely because the question is short.
     simple_output_tokens: int = 800
     medium_output_tokens: int = 1_200
     complex_output_tokens: int = 1_800
@@ -60,6 +63,8 @@ class AIConfig:
             retry_base_seconds=_float_env("DRJAVAN_AI_RETRY_BASE_SECONDS", 0.4, 0.0, 5.0),
             reasoning_effort=_choice_env("DRJAVAN_AI_REASONING_EFFORT", "low", {"low", "high", "max"}),
             cache_ttl_seconds=_int_env("DRJAVAN_AI_CACHE_TTL_SECONDS", 86_400, 60, 2_592_000),
+            planner_max_output_tokens=_int_env("DRJAVAN_AI_PLANNER_MAX_OUTPUT_TOKENS", 320, 160, 700),
+            refinement_max_output_tokens=_int_env("DRJAVAN_AI_REFINEMENT_MAX_OUTPUT_TOKENS", 220, 96, 500),
             expansion_max_output_tokens=_int_env("DRJAVAN_AI_EXPANSION_MAX_OUTPUT_TOKENS", 180, 64, 400),
             simple_evidence_tokens=_int_env("DRJAVAN_AI_SIMPLE_EVIDENCE_TOKENS", 2_500, 500, 9_000),
             medium_evidence_tokens=_int_env("DRJAVAN_AI_MEDIUM_EVIDENCE_TOKENS", 5_000, 1_000, 9_000),
@@ -81,10 +86,10 @@ class AIConfig:
 
     def cache_signature(self) -> str:
         return ":".join(str(x) for x in (
-            self.model, self.reasoning_effort, self.simple_evidence_tokens, self.medium_evidence_tokens,
-            self.complex_evidence_tokens, self.hard_evidence_tokens,
-            self.simple_output_tokens, self.medium_output_tokens, self.complex_output_tokens,
-            self.structured_retry_output_tokens,
+            self.model, self.reasoning_effort, self.planner_max_output_tokens, self.refinement_max_output_tokens,
+            self.simple_evidence_tokens, self.medium_evidence_tokens, self.complex_evidence_tokens,
+            self.hard_evidence_tokens, self.simple_output_tokens, self.medium_output_tokens,
+            self.complex_output_tokens, self.structured_retry_output_tokens,
         ))
 
 
