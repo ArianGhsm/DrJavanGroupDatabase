@@ -18,6 +18,30 @@ class RichScreen:
     is_rtl: bool = True
 
 
+class RichText(str):
+    """String-compatible fallback text carrying an optional Rich Message payload."""
+
+    rich_html: str
+    screen_id: str
+    is_rtl: bool
+
+    def __new__(cls, fallback_html: str, *, rich_html: str, screen_id: str, is_rtl: bool = True):
+        value = str.__new__(cls, fallback_html)
+        value.rich_html = rich_html
+        value.screen_id = screen_id
+        value.is_rtl = bool(is_rtl)
+        return value
+
+
+def rich_text(screen: RichScreen) -> RichText:
+    return RichText(
+        screen.fallback_html,
+        rich_html=screen.rich_html,
+        screen_id=screen.screen_id,
+        is_rtl=screen.is_rtl,
+    )
+
+
 def html_escape(value) -> str:
     return escape(str(value or ""), quote=False)
 
@@ -97,8 +121,11 @@ def answer_rich_screen(answer) -> RichScreen:
 
 
 def answer_chunks(answer):
-    """Backward-compatible sendMessage fallback."""
-    return _chunk_lines(answer_rich_screen(answer).fallback_html.split("\n"))
+    """Return one rich-capable string when possible; retain safe legacy chunking."""
+    screen = answer_rich_screen(answer)
+    if len(screen.rich_html) <= 32000:
+        return (rich_text(screen),)
+    return _chunk_lines(screen.fallback_html.split("\n"))
 
 
 def _chunk_lines(lines: Iterable[str], limit: int = SAFE_CHUNK):
@@ -133,7 +160,7 @@ def _split_long_line(line, limit):
     return tuple(parts)
 
 
-def sources_page(items, page, *, per_page=5):
+def _sources_fallback(items, page, *, per_page=5):
     total = max(1, (len(items) + per_page - 1) // per_page)
     page = max(0, min(page, total - 1))
     start = page * per_page
@@ -155,7 +182,7 @@ def sources_page(items, page, *, per_page=5):
 
 
 def sources_rich_screen(items, page, *, per_page=5):
-    fallback, total = sources_page(items, page, per_page=per_page)
+    fallback, total = _sources_fallback(items, page, per_page=per_page)
     page = max(0, min(page, total - 1))
     start = page * per_page
     rich = [f"<h3>📚 پیام‌های منبع — {page + 1}/{total}</h3>"]
@@ -173,6 +200,11 @@ def sources_rich_screen(items, page, *, per_page=5):
     return RichScreen("".join(rich), fallback, "archive_sources"), total
 
 
+def sources_page(items, page, *, per_page=5):
+    screen, total = sources_rich_screen(items, page, per_page=per_page)
+    return rich_text(screen), total
+
+
 def inline_keyboard(rows: Sequence[Sequence[tuple[str, str]]]):
     return {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in rows]}
 
@@ -181,4 +213,4 @@ _TAG_RE = re.compile(r"<[^>]+>", re.IGNORECASE)
 
 
 def html_to_plain(value: str) -> str:
-    return unescape(_TAG_RE.sub("", value))
+    return unescape(_TAG_RE.sub("", str(value)))
