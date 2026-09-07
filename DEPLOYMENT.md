@@ -1,73 +1,33 @@
 # DrJavanBot production deployment
 
-Deployment target is an isolated Linux/systemd service named `drjavanbot`. Do not share its Unix user, app directory, virtualenv, env file, runtime DB, cache, secret directory or process name with other bots.
+DrJavanBot must remain isolated from every other bot on the host. The self-updater architecture uses a control repository plus immutable release worktrees; persistent data and secrets never live inside a release.
 
 ## Fixed isolated layout
 
 - Unix user/group: `drjavanbot`
-- app: `/opt/drjavanbot/app`
-- venv: `/opt/drjavanbot/venv`
-- env: `/etc/drjavanbot/drjavanbot.env` (0600)
+- control repository: `/opt/drjavanbot/app`
+- releases: `/opt/drjavanbot/releases/<commit-sha>`
+- active symlink: `/opt/drjavanbot/current`
+- per-release virtualenv: `/opt/drjavanbot/releases/<commit-sha>/.venv`
+- env: `/etc/drjavanbot/drjavanbot.env` (`0600`, `root:root`)
 - data/SQLite: `/var/lib/drjavanbot/data`
-- AvalAI SecretStore: `/var/lib/drjavanbot/secrets` (directory 0700; secret file 0600)
+- AvalAI SecretStore: `/var/lib/drjavanbot/secrets` (`0700`; secret files `0600`)
+- updater state: `/var/lib/drjavanbot/update`
 - cache: `/var/cache/drjavanbot`
-- logs: journald, `journalctl -u drjavanbot`
-- service: `/etc/systemd/system/drjavanbot.service`
+- logs: journald (`journalctl -u drjavanbot`)
+- bot service: `drjavanbot.service`
+- updater units: `drjavanbot-updater.path` + `drjavanbot-updater.service`
 
-Prerequisites: Linux/systemd, Python 3.11+, Git, SQLite with FTS5, outbound HTTPS/DNS to Telegram and AvalAI.
+Prerequisites: Linux/systemd, Python 3.11+, Git, SQLite with FTS5, outbound HTTPS/DNS to Telegram, GitHub and AvalAI.
 
-## 1. Clone or update code
+## Runtime env format
 
-Fresh install:
-
-```bash
-sudo install -d -m 0755 /opt/drjavanbot
-sudo git clone https://github.com/ArianGhsm/DrJavanGroupDatabase.git /opt/drjavanbot/app
-cd /opt/drjavanbot/app
-git rev-parse HEAD
-```
-
-Existing install:
-
-```bash
-cd /opt/drjavanbot/app
-git fetch origin
-git checkout main
-git pull --ff-only origin main
-git rev-parse HEAD
-```
-
-The checked-out SHA must be the Stage-5 handoff SHA supplied with deployment.
-
-## 2. Create isolated user/runtime directories
-
-```bash
-sudo useradd --system --home /var/lib/drjavanbot --shell /usr/sbin/nologin drjavanbot || true
-sudo install -d -o drjavanbot -g drjavanbot -m 0700 \
-  /var/lib/drjavanbot /var/lib/drjavanbot/data /var/lib/drjavanbot/secrets /var/cache/drjavanbot
-sudo install -d -o root -g root -m 0755 /etc/drjavanbot
-```
-
-## 3. Install exact runtime/test dependencies
-
-```bash
-python3.11 -m venv /opt/drjavanbot/venv
-cd /opt/drjavanbot/app
-/opt/drjavanbot/venv/bin/python -m pip install -r requirements.lock
-/opt/drjavanbot/venv/bin/python -m pip install --no-deps .
-/opt/drjavanbot/venv/bin/python -m pip install -r requirements-dev.lock
-```
-
-Expected: all commands exit 0 and `drjavanbot`, `drjavanbot-bot`, `drjavanbot-smoke` exist in `/opt/drjavanbot/venv/bin/`.
-
-## 4. Create runtime env — no AvalAI key
-
-Create `/etc/drjavanbot/drjavanbot.env` with mode 0600. Required secret values for deployment are only the Telegram Bot Token and numeric Owner ID:
+`/etc/drjavanbot/drjavanbot.env` is intentionally compatible with both systemd `EnvironmentFile=` parsing and shell sourcing for operational checks. **Any value containing whitespace must be quoted.**
 
 ```text
-TELEGRAM_BOT_TOKEN=<set on server only>
+TELEGRAM_BOT_TOKEN=<server-only token>
 TELEGRAM_OWNER_ID=<numeric Telegram user id>
-DRJAVAN_ARCHIVE_DIR=/opt/drjavanbot/app/گروه دکتر جوان
+DRJAVAN_ARCHIVE_DIR="/opt/drjavanbot/current/گروه دکتر جوان"
 DRJAVAN_DATA_DIR=/var/lib/drjavanbot/data
 DRJAVAN_CACHE_DIR=/var/cache/drjavanbot
 AVALAI_BASE_URL=https://api.avalai.ir/v1
@@ -75,83 +35,117 @@ AVALAI_MODEL=deepseek-v4-flash
 LOG_LEVEL=INFO
 ```
 
-Then:
+Never put `AVALAI_API_KEY` in this file or Git. The owner configures it through the private Telegram settings flow; SecretStore keeps it under `/var/lib/drjavanbot/secrets/`.
+
+Permissions:
 
 ```bash
 sudo chmod 0600 /etc/drjavanbot/drjavanbot.env
 sudo chown root:root /etc/drjavanbot/drjavanbot.env
 ```
 
-**Never put `AVALAI_API_KEY` in this env or Git.** The owner configures/replaces/removes it later from the bot's private Telegram `/settings`; SecretStore writes it under `/var/lib/drjavanbot/secrets/`.
+## Existing running installation: one-time self-updater bootstrap
 
-## 5. Run complete tests and build the real archive index
+This is the normal path for the current server.
 
 ```bash
 cd /opt/drjavanbot/app
-set -a; . /etc/drjavanbot/drjavanbot.env; set +a
-/opt/drjavanbot/venv/bin/pytest -q
-/opt/drjavanbot/venv/bin/drjavanbot reindex
-/opt/drjavanbot/venv/bin/drjavanbot health
+git fetch origin main
+git pull --ff-only origin main
+pytest -q
+sudo python3 deploy/bootstrap_self_update.py
+```
+
+Bootstrap is idempotent and performs these checks before switching the live service:
+
+- repository origin is exactly the expected HTTPS GitHub repository;
+- tracked working tree is clean;
+- Python is 3.11+ and SQLite FTS5 works;
+- archive, env file and systemd unit sources exist;
+- release worktree really points to the requested commit;
+- release dependencies are reconciled even after an interrupted prior attempt;
+- compile + full pytest run with a private temporary directory and explicit pytest `--basetemp`;
+- `DRJAVAN_ARCHIVE_DIR` is rewritten atomically to the quoted `current` path;
+- existing release history is preserved;
+- only DrJavanBot systemd units are installed/restarted.
+
+If bootstrap fails after changing the active symlink/unit files, it restores the prior active release/unit snapshot where available and restarts only `drjavanbot.service`.
+
+Verify:
+
+```bash
+systemctl is-active drjavanbot.service
+systemctl is-active drjavanbot-updater.path
+systemctl status drjavanbot-updater.path --no-pager
 ```
 
 Expected:
-- `pytest`: exit 0; report exact test count.
-- `reindex`: exit 0; report actual archive file/message counts and elapsed time.
-- `health`: index `healthy=true`, SQLite/FTS integrity clean.
 
-Do not continue to service startup if any of these fail. Report the exact error/trace instead of broad code changes.
+- `drjavanbot.service`: `active`
+- `drjavanbot-updater.path`: `active (waiting)`
+- `drjavanbot-updater.service`: normally `inactive` between update requests because it is a oneshot service
 
-## 6. Smoke tests
+## Safe manual smoke without editing env
 
-Local/index smoke (no network credential beyond loaded env needed):
-
-```bash
-/opt/drjavanbot/venv/bin/drjavanbot-smoke
-```
-
-Expected: `healthy: true`, `fts5: true`, archive exists, index healthy.
-
-Telegram credential/network smoke:
+Because the env file now uses shell-safe quoting, it can be sourced when an operator needs a manual smoke check:
 
 ```bash
-/opt/drjavanbot/venv/bin/drjavanbot-smoke --telegram
+set -a
+. /etc/drjavanbot/drjavanbot.env
+set +a
+/opt/drjavanbot/current/.venv/bin/drjavanbot-smoke
+/opt/drjavanbot/current/.venv/bin/drjavanbot-smoke --telegram
 ```
 
-Expected: exit 0 and Telegram `getMe` returns a bot id. This does not require or test AvalAI API Key.
+Never print or echo the token while doing this.
 
-## 7. Install/start isolated systemd service
+## Routine updates after bootstrap
+
+Routine updates no longer require Codex or SSH:
+
+1. ChatGPT changes and commits GitHub `main`.
+2. GitHub Actions runs compile + full pytest.
+3. Owner opens Telegram `/settings` → **Software Update**.
+4. The bot writes a fixed-schema update request.
+5. Root-owned updater fetches `origin/main` and creates `/opt/drjavanbot/releases/<sha>`.
+6. Candidate release gets its own virtualenv.
+7. Server reruns compile + pytest in an isolated temp tree.
+8. A complete archive index is built in isolated staging data.
+9. Health/local smoke/Telegram `getMe` must pass.
+10. Only then is `drjavanbot.service` stopped, SQLite backed up, `current` atomically switched, production reindexed and the bot restarted.
+11. If post-switch validation fails, previous release and SQLite state are restored.
+
+The updater never accepts a repository URL, branch, service name, filesystem path or shell command from Telegram.
+
+## Rollback
+
+Owner rollback from Telegram selects the previous healthy release from updater history. It does not delete persistent secrets or runtime state. Rollback also reindexes and validates before being considered successful.
+
+Do not use ad-hoc `git checkout` against the live bot after the release architecture is installed.
+
+## Failure reporting contract
+
+If any bootstrap/update/smoke step fails, stop and report:
+
+- exact command/operation;
+- exit code;
+- exception/error text with secrets redacted;
+- current release SHA and target SHA where available.
+
+Do not broad-refactor on the server and do not modify/restart any other bot.
+
+## Fresh installation notes
+
+A fresh install still requires creating the isolated user/directories and initial env file before running the bootstrap:
 
 ```bash
-sudo cp /opt/drjavanbot/app/deploy/drjavanbot.service /etc/systemd/system/drjavanbot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now drjavanbot
-sudo systemctl status drjavanbot --no-pager
-sudo journalctl -u drjavanbot -n 100 --no-pager
+sudo useradd --system --home /var/lib/drjavanbot --shell /usr/sbin/nologin drjavanbot || true
+sudo install -d -m 0755 /opt/drjavanbot
+sudo install -d -o drjavanbot -g drjavanbot -m 0700 \
+  /var/lib/drjavanbot /var/lib/drjavanbot/data /var/lib/drjavanbot/secrets \
+  /var/lib/drjavanbot/update /var/cache/drjavanbot
+sudo install -d -o root -g root -m 0755 /etc/drjavanbot
+sudo git clone https://github.com/ArianGhsm/DrJavanGroupDatabase.git /opt/drjavanbot/app
 ```
 
-Expected: service `active (running)`; no traceback, token, API key or secret value in logs.
-
-## 8. Owner completes AvalAI setup in Telegram
-
-In a private chat with the running bot, owner opens `/settings`, selects Set/Replace API Key, sends the AvalAI key, and uses Test AvalAI. The key message is deleted best-effort, candidate key is validated before atomic replacement, and no restart is required.
-
-## Stop / restart / rollback
-
-```bash
-sudo systemctl stop drjavanbot
-sudo systemctl restart drjavanbot
-sudo systemctl disable --now drjavanbot   # only when intentionally disabling
-```
-
-Rollback code without deleting runtime state/secrets:
-
-```bash
-sudo systemctl stop drjavanbot
-cd /opt/drjavanbot/app
-git checkout <previous-known-good-sha>
-/opt/drjavanbot/venv/bin/python -m pip install --no-deps .
-sudo systemctl start drjavanbot
-sudo journalctl -u drjavanbot -n 100 --no-pager
-```
-
-Do not delete `/var/lib/drjavanbot` during rollback. Full reindex builds a temporary database and preserves the previous known-good index unless the replacement passes integrity validation.
+Create the env file using the quoted archive path shown above, then run `sudo python3 deploy/bootstrap_self_update.py`.
