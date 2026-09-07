@@ -55,6 +55,7 @@ class TelegramAPI:
         self._token = token
         self._transport = transport or UrllibTelegramTransport()
         self.timeout_seconds = timeout_seconds
+        self.rich_ui_enabled = True
 
     def call(self, method: str, **params: Any) -> Any:
         encoded = {}
@@ -87,28 +88,56 @@ class TelegramAPI:
         return list(self.call("getUpdates", offset=offset, timeout=timeout, allowed_updates=["message", "callback_query"]) or [])
 
     def send_message(self, chat_id, text, *, reply_markup=None, parse_mode: str | None = "HTML"):
+        rich_html = getattr(text, "rich_html", None)
+        if self.rich_ui_enabled and rich_html:
+            try:
+                return self.send_rich_message(
+                    chat_id,
+                    str(rich_html),
+                    reply_markup=reply_markup,
+                    is_rtl=bool(getattr(text, "is_rtl", True)),
+                )
+            except (TelegramNetworkError, TelegramUnauthorizedError):
+                raise
+            except TelegramAPIError:
+                # Presentation-only fallback: do not repeat retrieval, AI, update,
+                # payment, or any other business-side operation.
+                pass
         return self.call(
             "sendMessage",
             chat_id=chat_id,
-            text=text,
+            text=str(text),
             parse_mode=parse_mode,
             reply_markup=reply_markup,
             disable_web_page_preview=True,
         )
 
     def edit_message_text(self, chat_id, message_id, text, *, reply_markup=None, parse_mode="HTML"):
+        rich_html = getattr(text, "rich_html", None)
+        if self.rich_ui_enabled and rich_html:
+            try:
+                return self.edit_rich_message(
+                    chat_id,
+                    message_id,
+                    str(rich_html),
+                    reply_markup=reply_markup,
+                    is_rtl=bool(getattr(text, "is_rtl", True)),
+                )
+            except (TelegramNetworkError, TelegramUnauthorizedError):
+                raise
+            except TelegramAPIError:
+                pass
         return self.call(
             "editMessageText",
             chat_id=chat_id,
             message_id=message_id,
-            text=text,
+            text=str(text),
             parse_mode=parse_mode,
             reply_markup=reply_markup,
             disable_web_page_preview=True,
         )
 
     def send_rich_message(self, chat_id, rich_html: str, *, reply_markup=None, is_rtl: bool = True):
-        """Presentation-only Rich Message send; callers own fallback semantics."""
         return self.call(
             "sendRichMessage",
             chat_id=chat_id,
@@ -117,7 +146,6 @@ class TelegramAPI:
         )
 
     def edit_rich_message(self, chat_id, message_id, rich_html: str, *, reply_markup=None, is_rtl: bool = True):
-        """Edit a Rich Message without replaying any business operation."""
         return self.call(
             "editMessageText",
             chat_id=chat_id,
