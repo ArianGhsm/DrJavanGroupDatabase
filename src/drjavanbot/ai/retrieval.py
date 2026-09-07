@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from typing import Sequence
 
-from drjavanbot.normalization import normalize_text
+from drjavanbot.normalization import normalize_text, tokenize
 from drjavanbot.search import EvidenceCandidate, SearchBackend, SearchQuery
 from drjavanbot.search.terms import informative_query
 from .planner import SearchPlan
@@ -17,6 +17,7 @@ class RetrievalReport:
     families_with_hits: int
     duplicate_queries_skipped: int = 0
     context_hydrated: int = 0
+    discussion_windows: int = 0
 
 
 def retrieve_with_plan(
@@ -26,18 +27,20 @@ def retrieve_with_plan(
     candidate_limit: int = 96,
     evidence_limit: int = 36,
 ) -> RetrievalReport:
-    """Run independent lexical families, fuse winners, then hydrate context.
+    """Run independent lexical families, fuse winners, then hydrate discussion context.
 
     Search-plan hints determine *where to look* but never become evidence. Query
     de-duplication occurs after low-information filtering so semantically identical
     lexical queries cannot fake family coverage.
 
-    Context is deliberately deferred until after fusion. The previous design
-    expanded reply/neighborhood context for up to 24 candidates in every query
-    family and then discarded most of that work during fusion. On the production
-    249k-message archive this produced multi-second amplification. The optimized
-    path retrieves cheap primary candidates first, fuses/diversifies them, and
-    hydrates context only for the bounded fused winners.
+    Context is deliberately deferred until after fusion. The first semantic-search
+    implementation expanded reply/neighborhood context for every candidate in every
+    query family and discarded most of that work during fusion. The production path
+    now retrieves cheap primary candidates first, fuses/diversifies them, then opens
+    bounded discussion windows only around the strongest fused anchors. This keeps
+    the hard token budget unchanged while allowing a topic that unfolds over several
+    consecutive/reply messages to be understood as a conversation rather than as an
+    isolated hit.
     """
     prepared: list[tuple[str, SearchQuery]] = []
     seen_queries: set[str] = set()
@@ -68,7 +71,7 @@ def retrieve_with_plan(
         ))
 
     if not prepared:
-        return RetrievalReport((), 0, 0, duplicate_queries_skipped, 0)
+        return RetrievalReport((), 0, 0, duplicate_queries_skipped, 0, 0)
 
     queries = tuple(query for _, query in prepared)
     batch_search = getattr(backend, "search_many", None)
@@ -89,12 +92,14 @@ def retrieve_with_plan(
             hit_families.add(family_name)
 
     fused = _fuse_runs(runs, limit=evidence_limit)
-    hydrated, hydrated_count = _hydrate_context_after_fusion(
+    hydrated, hydrated_count, discussion_windows = _hydrate_context_after_fusion(
         backend,
         fused,
         reply_context=plan.reply_context,
         reply_depth=4,
-        limit=min(max(8, evidence_limit), 24),
+        # Wider context is useful only around the strongest anchors. Capping the
+        # number of expanded anchors bounds SQLite work and, later, token packing.
+        limit=min(max(8, evidence_limit // 2), 14),
     )
     return RetrievalReport(
         candidates=hydrated,
@@ -102,6 +107,7 @@ def retrieve_with_plan(
         families_with_hits=len(hit_families),
         duplicate_queries_skipped=duplicate_queries_skipped,
         context_hydrated=hydrated_count,
+        discussion_windows=discussion_windows,
     )
 
 
@@ -139,44 +145,95 @@ def _hydrate_context_after_fusion(
     reply_context: bool,
     reply_depth: int,
     limit: int,
-) -> tuple[tuple[EvidenceCandidate, ...], int]:
+) -> tuple[tuple[EvidenceCandidate, ...], int, int]:
+    """Expand only fused winners into bounded local discussion windows.
+
+    A relevant answer may be spread over multiple messages where only the first
+    message repeats the searched term. For each strong anchor we therefore keep a
+    small chronological window plus the backend's reply traversal. Windows become
+    wider when multiple retrieved anchors are close together (a strong signal that
+    the archive contains a multi-message discussion), or when the anchor is a short
+    context-dependent/reply message. No extra AI call is used here.
+    """
     values = tuple(candidates)
     if not values or not reply_context:
-        return values, 0
+        return values, 0, 0
 
     bounded_limit = min(max(0, int(limit)), len(values))
-    hydrate_many = getattr(backend, "hydrate_context", None)
-    if callable(hydrate_many):
-        hydrated = tuple(hydrate_many(values, reply_depth=reply_depth, limit=bounded_limit))
-        if len(hydrated) == len(values):
-            count = sum(1 for before, after in zip(values[:bounded_limit], hydrated[:bounded_limit]) if after.context and not before.context)
-            return hydrated, count
-
-    # Protocol-compatible fallback for custom/test backends. Existing context is
-    # never replaced; only empty fused winners are hydrated.
+    anchors = values[:bounded_limit]
     output: list[EvidenceCandidate] = []
-    count = 0
+    hydrated_count = 0
+    discussion_windows = 0
+
     for index, candidate in enumerate(values):
         if index >= bounded_limit or candidate.context:
             output.append(candidate)
             continue
+
+        before, after, discussion = _discussion_window(candidate, anchors)
         try:
-            context = tuple(backend.get_context(candidate.message, before=1, after=2, follow_reply=True))
+            context = tuple(
+                backend.get_context(
+                    candidate.message,
+                    before=before,
+                    after=after,
+                    follow_reply=True,
+                )
+            )
         except Exception:
+            # Context enrichment is recall/quality help, never a reason to turn a
+            # valid primary retrieval hit into a user-facing failure.
             context = ()
-        if context:
-            count += 1
-            reasons = set(candidate.match_reasons)
-            reasons.add("context_available")
-            output.append(replace(
-                candidate,
-                local_score=round(candidate.local_score + 0.20, 6),
-                match_reasons=tuple(sorted(reasons)),
-                context=context,
-            ))
-        else:
+
+        if not context:
             output.append(candidate)
-    return tuple(output), count
+            continue
+
+        hydrated_count += 1
+        if discussion:
+            discussion_windows += 1
+        reasons = set(candidate.match_reasons)
+        reasons.add("context_available")
+        if discussion:
+            reasons.add("discussion_window")
+        score = candidate.local_score + 0.20 + (0.12 if discussion else 0.0)
+        output.append(replace(
+            candidate,
+            local_score=round(score, 6),
+            match_reasons=tuple(sorted(reasons)),
+            context=context,
+        ))
+
+    return tuple(output), hydrated_count, discussion_windows
+
+
+def _discussion_window(
+    candidate: EvidenceCandidate,
+    anchors: Sequence[EvidenceCandidate],
+) -> tuple[int, int, bool]:
+    message = candidate.message
+    normalized = normalize_text(message.text_normalized or message.text_raw)
+    token_count = len(tokenize(normalized))
+    short_or_context_dependent = len(normalized) <= 48 or token_count <= 5
+
+    nearby_hits = 0
+    for other in anchors:
+        if other.message.source_locator == message.source_locator:
+            continue
+        if other.message.source_page != message.source_page:
+            continue
+        if abs(other.message.source_order - message.source_order) <= 10:
+            nearby_hits += 1
+
+    # Several independent search hits in the same short span are the strongest
+    # deterministic signal that the topic unfolds over a local conversation.
+    if nearby_hits >= 2:
+        return 4, 5, True
+    if nearby_hits == 1:
+        return 3, 4, True
+    if message.reply_to_message_id is not None or short_or_context_dependent:
+        return 3, 4, True
+    return 2, 3, False
 
 
 def _fuse_runs(
