@@ -209,7 +209,7 @@ def test_product_or_number_token_cannot_be_invented_outside_question_or_verified
 
 def test_product_token_is_allowed_when_it_is_in_verified_archive_quote():
     pack = build_evidence_pack("کدوم کامپوزیت خوبه", [candidate(1, "A", "Filtek Z250 خوب بود")], AIConfig())
-    payload = supported_answer(text="Filtek Z250 در گروه خوب توصیف شده.", supports=((1, "Filtek Z250 خوب بود"),))
+    payload = supported_answer(text="در گروه Filtek Z250 خوب بود", supports=((1, "Filtek Z250 خوب بود"),))
     answer = validate_answer_payload(payload, pack, question="کدوم کامپوزیت خوبه")
     assert answer.cited_message_ids == (1,)
     assert "Filtek Z250" in answer.direct_answer
@@ -243,9 +243,9 @@ def test_malformed_model_json_fails_closed():
 def test_disagreement_changes_local_archive_coverage_confidence():
     pack = build_evidence_pack("کدام بهتر است", [candidate(1, "A", "الف بهتر است"), candidate(2, "B", "ب بهتر است")], AIConfig())
     payload = supported_answer(
-        text="در گروه دو دیدگاه دیده می‌شود.",
+        text="در گروه الف بهتر است و ب بهتر است",
         supports=((1, "الف بهتر است"), (2, "ب بهتر است")),
-        extra_claims=({"kind": "disagreement", "text": "یک پیام الف و پیام دیگر ب را بهتر دانسته است.", "supports": [{"message_id": 1, "quote": "الف بهتر است"}, {"message_id": 2, "quote": "ب بهتر است"}]},),
+        extra_claims=({"kind": "disagreement", "text": "الف بهتر است و ب بهتر است", "supports": [{"message_id": 1, "quote": "الف بهتر است"}, {"message_id": 2, "quote": "ب بهتر است"}]},),
     )
     answer = validate_answer_payload(payload, pack, question="کدام بهتر است")
     assert answer.confidence == "medium"
