@@ -29,6 +29,13 @@ def main() -> int:
         raise SystemExit("bootstrap must run as root")
 
     account, python_exe, sha = _preflight()
+
+    # Repair the known legacy unquoted archive path before *any* bootstrap tests or
+    # later manual smoke commands can source the runtime env. This mutation is
+    # intentionally kept even if a later bootstrap gate fails: it only normalizes
+    # DRJAVAN_ARCHIVE_DIR and preserves all other values/ownership/mode.
+    _rewrite_env_archive_path()
+
     release = _prepare_release(sha, python_exe)
     _run_release_tests(release)
     (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
@@ -40,7 +47,6 @@ def main() -> int:
     try:
         _switch_current(release)
         switched = True
-        _rewrite_env_archive_path()
         _prepare_update_state(account, sha, previous_release)
         _install_units()
         _run(["systemctl", "daemon-reload"])
