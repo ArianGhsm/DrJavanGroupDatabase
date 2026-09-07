@@ -70,6 +70,10 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
         if any(reason in {"exact_phrase", "normalized_tokens", "synonym"} for reason in c.match_reasons)
     )
     max_family_coverage = max((_family_coverage(c.match_reasons) for c in candidates[:8]), default=0)
+    if len(candidates) >= 2 and len(authors) >= 2 and strong_reasons >= 2 and (
+        report.families_with_hits >= 2 or max_family_coverage >= 2
+    ):
+        return False, "strong_multi_family_match"
     if len(candidates) >= 5 and len(authors) >= 2 and (
         report.families_with_hits >= 2 or max_family_coverage >= 2 or strong_reasons >= 3
     ):
@@ -101,8 +105,6 @@ def _fuse_runs(
             terms: set[str] = item["terms"]  # type: ignore[assignment]
             reasons: set[str] = item["reasons"]  # type: ignore[assignment]
             score = float(item["score"])
-            # Reciprocal rank rewards consensus without letting many weak runs
-            # swamp one strong exact hit. Local scores are capped for stability.
             score += min(max(candidate.local_score, 0.0), 12.0) * 0.34
             score += 10.0 / (50.0 + rank)
             item["score"] = score
@@ -143,8 +145,6 @@ def _fuse_runs(
         )
 
     fused.sort(key=lambda c: (-c.local_score, c.message.source_page, c.message.source_order))
-    # Greedy diversity: repeated authors and very-near messages are softly
-    # penalized, never hard-deleted, so independent corroboration is favored.
     selected: list[EvidenceCandidate] = []
     author_counts: dict[str, int] = defaultdict(int)
     neighborhood_counts: dict[tuple[int, int], int] = defaultdict(int)
