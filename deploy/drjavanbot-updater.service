@@ -1,0 +1,23 @@
+[Unit]
+Description=DrJavanBot secure atomic updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/drjavanbot/app
+ExecStart=/usr/bin/python3 /opt/drjavanbot/app/deploy/self_update.py
+TimeoutStartSec=1800
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=full
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
