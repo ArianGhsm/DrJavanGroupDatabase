@@ -48,7 +48,22 @@ def main() -> int:
         _run([str(venv / "bin/python"), "-m", "pip", "install", "-r", "requirements.lock"], cwd=release)
         _run([str(venv / "bin/python"), "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release)
         _run([str(venv / "bin/python"), "-m", "pip", "install", "--no-deps", "."], cwd=release)
-    _run([str(venv / "bin/python"), "-m", "pytest", "-q"], cwd=release)
+
+    # Do not let pytest reuse /tmp/pytest-of-* created by another account or a
+    # previous privileged invocation.  A dedicated root-owned temp tree makes
+    # bootstrap repeatable on servers where multiple bots/tests share /tmp.
+    with tempfile.TemporaryDirectory(prefix="drjavanbot-bootstrap-", dir="/var/tmp") as temp_root:
+        test_env = dict(os.environ)
+        test_env["TMPDIR"] = temp_root
+        test_env["TEMP"] = temp_root
+        test_env["TMP"] = temp_root
+        pytest_base = str(Path(temp_root) / "pytest")
+        _run(
+            [str(venv / "bin/python"), "-m", "pytest", "-q", "--basetemp", pytest_base],
+            cwd=release,
+            env=test_env,
+        )
+
     (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
 
     temp_link = CURRENT.parent / ".current.bootstrap"
@@ -128,8 +143,8 @@ def _text(cmd: list[str]) -> str:
     return subprocess.check_output(cmd, text=True)
 
 
-def _run(cmd: list[str], cwd: Path | None = None) -> None:
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+def _run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+    subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=True)
 
 
 if __name__ == "__main__":
