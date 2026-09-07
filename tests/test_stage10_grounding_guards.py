@@ -93,10 +93,30 @@ def test_generic_framing_without_archive_content_is_rejected():
         )
 
 
-def test_exact_model_number_and_substantive_words_pass_when_in_quote():
+def test_same_vocabulary_cannot_reverse_a_comparison():
+    pack = _pack("A بهتر از B است")
+    with pytest.raises(CitationValidationError):
+        validate_answer_payload(
+            _payload("در گروه B بهتر از A است", "A بهتر از B است"),
+            pack,
+            question="A یا B؟",
+        )
+
+
+def test_negation_cannot_be_dropped_from_archive_quote():
+    pack = _pack("این ماده خوب نیست")
+    with pytest.raises(CitationValidationError):
+        validate_answer_payload(
+            _payload("در گروه این ماده خوب است", "این ماده خوب نیست"),
+            pack,
+            question="این ماده خوبه؟",
+        )
+
+
+def test_exact_model_number_and_substantive_words_pass_when_quote_is_preserved_intact():
     pack = _pack("e max مدل 3 خوب توصیف شد")
     answer = validate_answer_payload(
-        _payload("e max مدل 3 در گروه خوب توصیف شده است", "e max مدل 3 خوب توصیف شد"),
+        _payload("در گروه e max مدل 3 خوب توصیف شد", "e max مدل 3 خوب توصیف شد"),
         pack,
         question="کدوم بهتره؟",
     )
