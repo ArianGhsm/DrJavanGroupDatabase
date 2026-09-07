@@ -29,16 +29,7 @@ def retrieve_with_plan(
     candidate_limit: int = 160,
     evidence_limit: int = 56,
 ) -> RetrievalReport:
-    """Run faceted lexical families, bridge nearby hits, then hydrate discussion context.
-
-    A Telegram answer frequently spans multiple messages: one message names the
-    procedure, a nearby reply says only "هفت سالگی", another mentions the child,
-    and none contains the whole user question. Same-message rank fusion cannot
-    recover that structure. This implementation therefore treats proximity of
-    DIFFERENT query-family hits as a conversation-level signal before context is
-    hydrated. Search hints still only decide where to look; final facts must come
-    from real retrieved archive messages.
-    """
+    """Run faceted lexical families, bridge topic-anchored nearby hits, hydrate context."""
     prepared: list[tuple[str, SearchQuery]] = []
     seen_queries: set[str] = set()
     duplicate_queries_skipped = 0
@@ -86,14 +77,13 @@ def retrieve_with_plan(
         if result:
             hit_families.add(family_name)
 
-    fused, bridge_count = _fuse_runs(runs, limit=evidence_limit)
+    anchor_families = _anchor_family_names(plan)
+    fused, bridge_count = _fuse_runs(runs, limit=evidence_limit, anchor_families=anchor_families)
     hydrated, hydrated_count, discussion_windows = _hydrate_context_after_fusion(
         backend,
         fused,
         reply_context=plan.reply_context,
         reply_depth=5,
-        # Hydrate a little more than the old top-14. This is still bounded local
-        # SQLite work and does not enlarge the hard evidence-token cap.
         limit=min(max(12, evidence_limit // 2), 20),
     )
     return RetrievalReport(
@@ -122,9 +112,12 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
         if any(reason in {"exact_phrase", "normalized_tokens", "synonym"} for reason in c.match_reasons)
     )
     max_family_coverage = max((_family_coverage(c.match_reasons) for c in candidates[:10]), default=0)
-    bridged = sum(1 for c in candidates[:12] if "conversation_bridge" in c.match_reasons)
-    if bridged >= 2 and len(authors) >= 2:
-        return False, "cross_family_conversation_coverage"
+    anchored_bridges = sum(
+        1 for c in candidates[:12]
+        if "conversation_bridge" in c.match_reasons and "anchor_family_hit" in c.match_reasons
+    )
+    if anchored_bridges >= 2 and len(authors) >= 2:
+        return False, "topic_anchored_conversation_coverage"
     if len(candidates) >= 2 and len(authors) >= 2 and strong_reasons >= 2 and (
         report.families_with_hits >= 2 or max_family_coverage >= 2
     ):
@@ -146,7 +139,6 @@ def _hydrate_context_after_fusion(
     reply_depth: int,
     limit: int,
 ) -> tuple[tuple[EvidenceCandidate, ...], int, int]:
-    """Expand fused winners into bounded local discussion windows."""
     values = tuple(candidates)
     if not values or not reply_context:
         return values, 0, 0
@@ -208,12 +200,14 @@ def _discussion_window(
 
     bridge_coverage = _bridge_coverage(candidate.match_reasons)
     if "conversation_bridge" in candidate.match_reasons:
-        # Cross-family proximity is stronger than merely having two generic hits
-        # near each other. Give the thread enough room for a short answer/reply to
-        # appear without globally increasing the evidence budget.
-        if bridge_coverage >= 3:
+        if "anchor_family_hit" in candidate.match_reasons and bridge_coverage >= 3:
             return 6, 8, True
-        return 5, 6, True
+        if "anchor_family_hit" in candidate.match_reasons:
+            return 5, 7, True
+        # A facet-only hit near a topic anchor is useful mainly as context. Keep
+        # its own expansion bounded because the topic anchor receives the wider
+        # window and will normally pull this short reply in.
+        return 3, 4, True
 
     nearby_hits = 0
     for other in anchors:
@@ -234,8 +228,12 @@ def _discussion_window(
 
 
 def _fuse_runs(
-    runs: Sequence[tuple[str, Sequence[EvidenceCandidate]]], *, limit: int
+    runs: Sequence[tuple[str, Sequence[EvidenceCandidate]]],
+    *,
+    limit: int,
+    anchor_families: set[str] | None = None,
 ) -> tuple[tuple[EvidenceCandidate, ...], int]:
+    anchors = set(anchor_families or ())
     state: dict[str, dict[str, object]] = {}
     positional_hits: list[tuple[str, int, int, str]] = []
 
@@ -269,26 +267,31 @@ def _fuse_runs(
             if len(candidate.context) > len(current.context):
                 item["candidate"] = candidate
 
-    # Conversation-level fusion: a topic hit and a timing/population hit in
-    # different nearby messages should reinforce the THREAD even though their
-    # source locators differ. This is the critical bridge for short Telegram
-    # replies such as a bare age/number that would otherwise rank as unrelated.
     bridge_count = 0
     for key, item in state.items():
         candidate: EvidenceCandidate = item["candidate"]  # type: ignore[assignment]
         direct_families: set[str] = item["families"]  # type: ignore[assignment]
+        direct_anchor = bool(direct_families & anchors) if anchors else True
         nearby_families = set(direct_families)
         for family, page, order, other_key in positional_hits:
             if other_key == key or page != candidate.message.source_page:
                 continue
             if abs(order - candidate.message.source_order) <= 14:
                 nearby_families.add(family)
-        if len(nearby_families) > len(direct_families):
+
+        nearby_has_anchor = bool(nearby_families & anchors) if anchors else True
+        has_new_family = len(nearby_families) > len(direct_families)
+        if has_new_family and nearby_has_anchor:
             coverage = len(nearby_families)
             reasons: set[str] = item["reasons"]  # type: ignore[assignment]
             reasons.add("conversation_bridge")
             reasons.add(f"bridge_family_coverage:{coverage}")
-            item["score"] = float(item["score"]) + min(2.4, 0.75 + 0.42 * max(0, coverage - 2))
+            if direct_anchor:
+                reasons.add("anchor_family_hit")
+                bridge_bonus = min(1.9, 0.78 + 0.34 * max(0, coverage - 2))
+            else:
+                bridge_bonus = min(0.70, 0.32 + 0.16 * max(0, coverage - 2))
+            item["score"] = float(item["score"]) + bridge_bonus
             bridge_count += 1
 
     fused: list[EvidenceCandidate] = []
@@ -297,6 +300,10 @@ def _fuse_runs(
         families: set[str] = item["families"]  # type: ignore[assignment]
         reasons: set[str] = item["reasons"]  # type: ignore[assignment]
         score = float(item["score"])
+        direct_anchor = bool(families & anchors) if anchors else True
+        if direct_anchor:
+            score += 1.05
+            reasons.add("anchor_family_hit")
         if len(families) > 1:
             score += min(2.0, 0.65 * (len(families) - 1))
         if candidate.message.reply_to_message_id is not None:
@@ -331,10 +338,12 @@ def _fuse_runs(
             author = candidate.message.author_normalized or candidate.message.author or ""
             neighborhood = (candidate.message.source_page, candidate.message.source_order // 8)
             effective = candidate.local_score
+            if "anchor_family_hit" in candidate.match_reasons:
+                effective += 0.38
             effective -= min(0.9, author_counts[author] * 0.28) if author else 0.0
             neighborhood_penalty = min(0.8, neighborhood_counts[neighborhood] * 0.30)
-            if "conversation_bridge" in candidate.match_reasons:
-                neighborhood_penalty *= 0.45
+            if "conversation_bridge" in candidate.match_reasons and "anchor_family_hit" in candidate.match_reasons:
+                neighborhood_penalty *= 0.55
             effective -= neighborhood_penalty
             if effective > best_effective:
                 best_effective = effective
@@ -346,6 +355,31 @@ def _fuse_runs(
             author_counts[author] += 1
         neighborhood_counts[(chosen.message.source_page, chosen.message.source_order // 8)] += 1
     return tuple(selected), bridge_count
+
+
+def _anchor_family_names(plan: SearchPlan) -> set[str]:
+    """Families that directly carry the user's core clinical concept."""
+    core = tuple(
+        normalize_text(value)
+        for value in (*plan.core_concepts, *plan.aliases)
+        if normalize_text(value) and len(normalize_text(value)) >= 3
+    )
+    out: set[str] = set()
+    for family in plan.query_families:
+        name = family.name.casefold()
+        if any(token in name for token in ("topic", "core", "procedure", "product", "material", "entity")):
+            out.add(family.name)
+            continue
+        for query in family.queries:
+            normalized = normalize_text(query)
+            if any(term in normalized or normalized in term for term in core):
+                out.add(family.name)
+                break
+    if not out and plan.query_families:
+        # Fail soft: the first family is planner-defined and is generally the
+        # main topic family. This affects ranking only, never evidence validity.
+        out.add(plan.query_families[0].name)
+    return out
 
 
 def _family_coverage(reasons: Sequence[str]) -> int:
