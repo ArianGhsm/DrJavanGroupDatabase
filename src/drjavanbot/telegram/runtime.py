@@ -116,6 +116,7 @@ def build_runtime() -> tuple[PollingRunner, TelegramBotApp]:
     state=BotStateStore(settings.data_dir/"bot_state.sqlite3",default_rate_limit=tg.default_rate_limit_per_minute)
     services=RuntimeServices(archive_dir=settings.archive_dir,data_dir=settings.data_dir,cache_dir=settings.cache_dir,secret_dir=settings.data_dir.parent/"secrets",base_ai_config=AIConfig.from_env(),state=state)
     api=TelegramAPI(settings.telegram_bot_token,timeout_seconds=float(tg.poll_timeout_seconds+10))
+    api.rich_ui_enabled=tg.rich_ui_enabled
     app=TelegramBotApp(api=api,owner_id=settings.telegram_owner_id,services=services,state=state,config=tg)
     return PollingRunner(app,api,tg),app
 
