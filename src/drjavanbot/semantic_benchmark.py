@@ -172,14 +172,14 @@ def default_semantic_cases() -> tuple[SemanticEvalCase, ...]:
         ),
         SemanticEvalCase(
             name="no_evidence_sentinel",
-            question="drjavan_no_evidence_9f7b6a21",
+            question="zzqv9f7b6a21drjx",
             plan=_plan(
                 "archive_lookup",
-                ("drjavan_no_evidence_9f7b6a21",),
-                (SearchFamily("sentinel", ("drjavan_no_evidence_9f7b6a21",)),),
+                ("zzqv9f7b6a21drjx",),
+                (SearchFamily("sentinel", ("zzqv9f7b6a21drjx",)),),
                 reply_context=False,
             ),
-            anchors=("drjavan_no_evidence_9f7b6a21",),
+            anchors=("zzqv9f7b6a21drjx",),
             expectation="absent",
         ),
     )
