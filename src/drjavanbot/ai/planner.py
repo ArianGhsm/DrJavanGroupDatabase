@@ -12,6 +12,7 @@ _MAX_INITIAL_FAMILIES = 6
 _MAX_FINAL_FAMILIES = 10
 _MAX_QUERIES_PER_FAMILY = 4
 _MAX_TOTAL_QUERIES = 20
+_MAX_PARSED_INITIAL_QUERIES = _MAX_INITIAL_FAMILIES * _MAX_QUERIES_PER_FAMILY
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +43,10 @@ class SearchPlan:
     def queries(self) -> tuple[tuple[str, str], ...]:
         """Return a bounded, family-balanced query schedule.
 
-        The previous implementation exhausted early families before later ones.
-        For faceted questions that could mean all topic queries ran while an age,
-        population or mechanism family was silently dropped by the global cap.
-        Round-robin scheduling guarantees every family gets a chance before a
-        second/third spelling variant consumes capacity.
+        Initial parsing intentionally keeps all six bounded families even though
+        execution has a smaller global query cap. Round-robin scheduling then
+        guarantees every facet gets a first chance before later spelling variants
+        consume the remaining slots.
         """
         out: list[tuple[str, str]] = []
         seen: set[str] = set()
@@ -151,12 +151,7 @@ def deterministic_fallback_plan(question: str) -> SearchPlan:
 
 
 def infer_question_aspects(question: str) -> tuple[str, ...]:
-    """Infer generic answer facets without adding domain facts.
-
-    This is a deterministic safety net for planner omissions. The terms describe
-    *what kind of answer the user asks for* (timing, population, comparison...),
-    not what the dental answer is.
-    """
+    """Infer generic answer facets without adding domain facts."""
     normalized = normalize_text(question)
     checks = (
         ("timing_age", ("سن", "سنی", "سالگی", "چند سال", "چه زمانی", "زمان مناسب", "کی ", " age", "when", "timing")),
@@ -213,7 +208,11 @@ def _plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
     reply_context = payload.get("reply_context", True)
     if not isinstance(reply_context, bool):
         reply_context = True
-    families = list(_parse_families(payload.get("query_families"), max_families=_MAX_INITIAL_FAMILIES, total_limit=_MAX_TOTAL_QUERIES))
+    families = list(_parse_families(
+        payload.get("query_families"),
+        max_families=_MAX_INITIAL_FAMILIES,
+        total_limit=_MAX_PARSED_INITIAL_QUERIES,
+    ))
     families.extend(_generic_aspect_families(question, existing=families))
     families = list(_dedupe_families(families))[:_MAX_INITIAL_FAMILIES]
 
