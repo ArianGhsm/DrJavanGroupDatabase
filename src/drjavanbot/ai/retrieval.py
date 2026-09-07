@@ -18,35 +18,32 @@ class RetrievalReport:
     duplicate_queries_skipped: int = 0
     context_hydrated: int = 0
     discussion_windows: int = 0
+    conversation_bridges: int = 0
+    hit_family_names: tuple[str, ...] = ()
 
 
 def retrieve_with_plan(
     backend: SearchBackend,
     plan: SearchPlan,
     *,
-    candidate_limit: int = 96,
-    evidence_limit: int = 36,
+    candidate_limit: int = 160,
+    evidence_limit: int = 56,
 ) -> RetrievalReport:
-    """Run independent lexical families, fuse winners, then hydrate discussion context.
+    """Run faceted lexical families, bridge nearby hits, then hydrate discussion context.
 
-    Search-plan hints determine *where to look* but never become evidence. Query
-    de-duplication occurs after low-information filtering so semantically identical
-    lexical queries cannot fake family coverage.
-
-    Context is deliberately deferred until after fusion. The first semantic-search
-    implementation expanded reply/neighborhood context for every candidate in every
-    query family and discarded most of that work during fusion. The production path
-    now retrieves cheap primary candidates first, fuses/diversifies them, then opens
-    bounded discussion windows only around the strongest fused anchors. This keeps
-    the hard token budget unchanged while allowing a topic that unfolds over several
-    consecutive/reply messages to be understood as a conversation rather than as an
-    isolated hit.
+    A Telegram answer frequently spans multiple messages: one message names the
+    procedure, a nearby reply says only "هفت سالگی", another mentions the child,
+    and none contains the whole user question. Same-message rank fusion cannot
+    recover that structure. This implementation therefore treats proximity of
+    DIFFERENT query-family hits as a conversation-level signal before context is
+    hydrated. Search hints still only decide where to look; final facts must come
+    from real retrieved archive messages.
     """
     prepared: list[tuple[str, SearchQuery]] = []
     seen_queries: set[str] = set()
     duplicate_queries_skipped = 0
-    per_family_evidence_limit = max(8, min(20, evidence_limit))
-    bounded_candidate_limit = max(20, min(candidate_limit, 140))
+    per_family_evidence_limit = max(10, min(24, evidence_limit))
+    bounded_candidate_limit = max(40, min(candidate_limit, 220))
 
     for family_name, raw_query in plan.queries:
         query_text = informative_query(raw_query)
@@ -63,7 +60,7 @@ def retrieve_with_plan(
                 raw_query=query_text,
                 candidate_limit=bounded_candidate_limit,
                 evidence_limit=per_family_evidence_limit,
-                reply_depth=4 if plan.reply_context else 1,
+                reply_depth=5 if plan.reply_context else 1,
                 context_before=None if plan.reply_context else 0,
                 context_after=None if plan.reply_context else 0,
                 include_context=False,
@@ -71,15 +68,13 @@ def retrieve_with_plan(
         ))
 
     if not prepared:
-        return RetrievalReport((), 0, 0, duplicate_queries_skipped, 0, 0)
+        return RetrievalReport((), 0, 0, duplicate_queries_skipped, 0, 0, 0, ())
 
     queries = tuple(query for _, query in prepared)
     batch_search = getattr(backend, "search_many", None)
     if callable(batch_search):
         result_sets = tuple(tuple(values) for values in batch_search(queries))
         if len(result_sets) != len(queries):
-            # Capability implementations must preserve positional correspondence.
-            # Fall back safely rather than silently mis-assigning query families.
             result_sets = tuple(tuple(backend.search(query)) for query in queries)
     else:
         result_sets = tuple(tuple(backend.search(query)) for query in queries)
@@ -91,15 +86,15 @@ def retrieve_with_plan(
         if result:
             hit_families.add(family_name)
 
-    fused = _fuse_runs(runs, limit=evidence_limit)
+    fused, bridge_count = _fuse_runs(runs, limit=evidence_limit)
     hydrated, hydrated_count, discussion_windows = _hydrate_context_after_fusion(
         backend,
         fused,
         reply_context=plan.reply_context,
-        reply_depth=4,
-        # Wider context is useful only around the strongest anchors. Capping the
-        # number of expanded anchors bounds SQLite work and, later, token packing.
-        limit=min(max(8, evidence_limit // 2), 14),
+        reply_depth=5,
+        # Hydrate a little more than the old top-14. This is still bounded local
+        # SQLite work and does not enlarge the hard evidence-token cap.
+        limit=min(max(12, evidence_limit // 2), 20),
     )
     return RetrievalReport(
         candidates=hydrated,
@@ -108,6 +103,8 @@ def retrieve_with_plan(
         duplicate_queries_skipped=duplicate_queries_skipped,
         context_hydrated=hydrated_count,
         discussion_windows=discussion_windows,
+        conversation_bridges=bridge_count,
+        hit_family_names=tuple(sorted(hit_families)),
     )
 
 
@@ -117,14 +114,17 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
         return True, "no_candidates"
     authors = {
         c.message.author_normalized or c.message.author
-        for c in candidates[:12]
+        for c in candidates[:16]
         if c.message.author_normalized or c.message.author
     }
     strong_reasons = sum(
-        1 for c in candidates[:8]
+        1 for c in candidates[:10]
         if any(reason in {"exact_phrase", "normalized_tokens", "synonym"} for reason in c.match_reasons)
     )
-    max_family_coverage = max((_family_coverage(c.match_reasons) for c in candidates[:8]), default=0)
+    max_family_coverage = max((_family_coverage(c.match_reasons) for c in candidates[:10]), default=0)
+    bridged = sum(1 for c in candidates[:12] if "conversation_bridge" in c.match_reasons)
+    if bridged >= 2 and len(authors) >= 2:
+        return False, "cross_family_conversation_coverage"
     if len(candidates) >= 2 and len(authors) >= 2 and strong_reasons >= 2 and (
         report.families_with_hits >= 2 or max_family_coverage >= 2
     ):
@@ -146,15 +146,7 @@ def _hydrate_context_after_fusion(
     reply_depth: int,
     limit: int,
 ) -> tuple[tuple[EvidenceCandidate, ...], int, int]:
-    """Expand only fused winners into bounded local discussion windows.
-
-    A relevant answer may be spread over multiple messages where only the first
-    message repeats the searched term. For each strong anchor we therefore keep a
-    small chronological window plus the backend's reply traversal. Windows become
-    wider when multiple retrieved anchors are close together (a strong signal that
-    the archive contains a multi-message discussion), or when the anchor is a short
-    context-dependent/reply message. No extra AI call is used here.
-    """
+    """Expand fused winners into bounded local discussion windows."""
     values = tuple(candidates)
     if not values or not reply_context:
         return values, 0, 0
@@ -181,8 +173,6 @@ def _hydrate_context_after_fusion(
                 )
             )
         except Exception:
-            # Context enrichment is recall/quality help, never a reason to turn a
-            # valid primary retrieval hit into a user-facing failure.
             context = ()
 
         if not context:
@@ -196,7 +186,7 @@ def _hydrate_context_after_fusion(
         reasons.add("context_available")
         if discussion:
             reasons.add("discussion_window")
-        score = candidate.local_score + 0.20 + (0.12 if discussion else 0.0)
+        score = candidate.local_score + 0.20 + (0.16 if discussion else 0.0)
         output.append(replace(
             candidate,
             local_score=round(score, 6),
@@ -214,7 +204,16 @@ def _discussion_window(
     message = candidate.message
     normalized = normalize_text(message.text_normalized or message.text_raw)
     token_count = len(tokenize(normalized))
-    short_or_context_dependent = len(normalized) <= 48 or token_count <= 5
+    short_or_context_dependent = len(normalized) <= 56 or token_count <= 6
+
+    bridge_coverage = _bridge_coverage(candidate.match_reasons)
+    if "conversation_bridge" in candidate.match_reasons:
+        # Cross-family proximity is stronger than merely having two generic hits
+        # near each other. Give the thread enough room for a short answer/reply to
+        # appear without globally increasing the evidence budget.
+        if bridge_coverage >= 3:
+            return 6, 8, True
+        return 5, 6, True
 
     nearby_hits = 0
     for other in anchors:
@@ -222,15 +221,13 @@ def _discussion_window(
             continue
         if other.message.source_page != message.source_page:
             continue
-        if abs(other.message.source_order - message.source_order) <= 10:
+        if abs(other.message.source_order - message.source_order) <= 12:
             nearby_hits += 1
 
-    # Several independent search hits in the same short span are the strongest
-    # deterministic signal that the topic unfolds over a local conversation.
     if nearby_hits >= 2:
-        return 4, 5, True
+        return 4, 6, True
     if nearby_hits == 1:
-        return 3, 4, True
+        return 3, 5, True
     if message.reply_to_message_id is not None or short_or_context_dependent:
         return 3, 4, True
     return 2, 3, False
@@ -238,11 +235,14 @@ def _discussion_window(
 
 def _fuse_runs(
     runs: Sequence[tuple[str, Sequence[EvidenceCandidate]]], *, limit: int
-) -> tuple[EvidenceCandidate, ...]:
+) -> tuple[tuple[EvidenceCandidate, ...], int]:
     state: dict[str, dict[str, object]] = {}
+    positional_hits: list[tuple[str, int, int, str]] = []
+
     for family, candidates in runs:
         for rank, candidate in enumerate(candidates, start=1):
             key = candidate.message.source_locator
+            positional_hits.append((family, candidate.message.source_page, candidate.message.source_order, key))
             item = state.setdefault(
                 key,
                 {
@@ -268,6 +268,28 @@ def _fuse_runs(
             current: EvidenceCandidate = item["candidate"]  # type: ignore[assignment]
             if len(candidate.context) > len(current.context):
                 item["candidate"] = candidate
+
+    # Conversation-level fusion: a topic hit and a timing/population hit in
+    # different nearby messages should reinforce the THREAD even though their
+    # source locators differ. This is the critical bridge for short Telegram
+    # replies such as a bare age/number that would otherwise rank as unrelated.
+    bridge_count = 0
+    for key, item in state.items():
+        candidate: EvidenceCandidate = item["candidate"]  # type: ignore[assignment]
+        direct_families: set[str] = item["families"]  # type: ignore[assignment]
+        nearby_families = set(direct_families)
+        for family, page, order, other_key in positional_hits:
+            if other_key == key or page != candidate.message.source_page:
+                continue
+            if abs(order - candidate.message.source_order) <= 14:
+                nearby_families.add(family)
+        if len(nearby_families) > len(direct_families):
+            coverage = len(nearby_families)
+            reasons: set[str] = item["reasons"]  # type: ignore[assignment]
+            reasons.add("conversation_bridge")
+            reasons.add(f"bridge_family_coverage:{coverage}")
+            item["score"] = float(item["score"]) + min(2.4, 0.75 + 0.42 * max(0, coverage - 2))
+            bridge_count += 1
 
     fused: list[EvidenceCandidate] = []
     for item in state.values():
@@ -302,15 +324,18 @@ def _fuse_runs(
     author_counts: dict[str, int] = defaultdict(int)
     neighborhood_counts: dict[tuple[int, int], int] = defaultdict(int)
     remaining = list(fused)
-    while remaining and len(selected) < max(1, min(limit, 100)):
+    while remaining and len(selected) < max(1, min(limit, 120)):
         best_index = 0
         best_effective = float("-inf")
-        for index, candidate in enumerate(remaining[:80]):
+        for index, candidate in enumerate(remaining[:120]):
             author = candidate.message.author_normalized or candidate.message.author or ""
-            neighborhood = (candidate.message.source_page, candidate.message.source_order // 6)
+            neighborhood = (candidate.message.source_page, candidate.message.source_order // 8)
             effective = candidate.local_score
             effective -= min(0.9, author_counts[author] * 0.28) if author else 0.0
-            effective -= min(0.8, neighborhood_counts[neighborhood] * 0.32)
+            neighborhood_penalty = min(0.8, neighborhood_counts[neighborhood] * 0.30)
+            if "conversation_bridge" in candidate.match_reasons:
+                neighborhood_penalty *= 0.45
+            effective -= neighborhood_penalty
             if effective > best_effective:
                 best_effective = effective
                 best_index = index
@@ -319,13 +344,23 @@ def _fuse_runs(
         author = chosen.message.author_normalized or chosen.message.author or ""
         if author:
             author_counts[author] += 1
-        neighborhood_counts[(chosen.message.source_page, chosen.message.source_order // 6)] += 1
-    return tuple(selected)
+        neighborhood_counts[(chosen.message.source_page, chosen.message.source_order // 8)] += 1
+    return tuple(selected), bridge_count
 
 
 def _family_coverage(reasons: Sequence[str]) -> int:
     for reason in reasons:
         if reason.startswith("family_coverage:"):
+            try:
+                return int(reason.split(":", 1)[1])
+            except ValueError:
+                return 0
+    return 0
+
+
+def _bridge_coverage(reasons: Sequence[str]) -> int:
+    for reason in reasons:
+        if reason.startswith("bridge_family_coverage:"):
             try:
                 return int(reason.split(":", 1)[1])
             except ValueError:
