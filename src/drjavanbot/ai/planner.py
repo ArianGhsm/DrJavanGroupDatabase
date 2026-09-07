@@ -8,7 +8,8 @@ from drjavanbot.search.terms import informative_query, informative_tokens
 from .validation import ModelOutputError, parse_json_object
 
 PLANNER_VERSION = "semantic-search-plan-v1"
-_MAX_FAMILIES = 5
+_MAX_INITIAL_FAMILIES = 5
+_MAX_FINAL_FAMILIES = 8
 _MAX_QUERIES_PER_FAMILY = 4
 _MAX_TOTAL_QUERIES = 14
 
@@ -52,16 +53,22 @@ class SearchPlan:
         return tuple(out)
 
     def with_added_families(self, families: Iterable[SearchFamily]) -> "SearchPlan":
-        merged: list[SearchFamily] = list(self.query_families)
+        """Add bounded refinement families without being blocked by a full initial plan."""
+        merged: list[SearchFamily] = list(self.query_families[:_MAX_INITIAL_FAMILIES])
         names = {f.name.casefold() for f in merged}
+        existing_queries = {normalize_text(q) for f in merged for q in f.queries if normalize_text(q)}
         for family in families:
-            if len(merged) >= _MAX_FAMILIES:
+            if len(merged) >= _MAX_FINAL_FAMILIES:
                 break
+            fresh = tuple(q for q in family.queries if normalize_text(q) not in existing_queries)
+            if not fresh:
+                continue
             name = family.name
             if name.casefold() in names:
                 name = f"{name}-refined"
-            merged.append(SearchFamily(name=name, queries=family.queries))
+            merged.append(SearchFamily(name=name, queries=fresh[:_MAX_QUERIES_PER_FAMILY]))
             names.add(name.casefold())
+            existing_queries.update(normalize_text(q) for q in fresh)
         return replace(self, query_families=tuple(merged))
 
     def summary(self) -> dict[str, Any]:
@@ -69,7 +76,7 @@ class SearchPlan:
             "intent": self.intent,
             "core_concepts": list(self.core_concepts[:6]),
             "entity_types": list(self.entity_types[:4]),
-            "query_families": [f.to_dict() for f in self.query_families[:_MAX_FAMILIES]],
+            "query_families": [f.to_dict() for f in self.query_families[:_MAX_FINAL_FAMILIES]],
             "reply_context": self.reply_context,
         }
 
@@ -152,10 +159,8 @@ def _plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
     reply_context = payload.get("reply_context", True)
     if not isinstance(reply_context, bool):
         reply_context = True
-    families = _parse_families(payload.get("query_families"), max_families=_MAX_FAMILIES, total_limit=_MAX_TOTAL_QUERIES)
+    families = _parse_families(payload.get("query_families"), max_families=_MAX_INITIAL_FAMILIES, total_limit=_MAX_TOTAL_QUERIES)
 
-    # A model may understand the intent but omit query_families. Keep the plan
-    # useful with a deterministic topical query rather than failing the request.
     if searchable and not families:
         fallback = deterministic_fallback_plan(question)
         families = fallback.query_families
