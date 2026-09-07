@@ -27,12 +27,7 @@ class MediaRef:
 
 @dataclass(frozen=True, slots=True)
 class MessageRecord:
-    """Loss-minimizing representation of one Telegram-export message block.
-
-    ``message_id`` is the numeric Telegram message identifier when the HTML
-    anchor is parseable. ``dom_id`` preserves the original HTML id verbatim,
-    including service/date markers such as ``message-3399``.
-    """
+    """Loss-minimizing representation of one Telegram-export message block."""
 
     message_id: int | None
     dom_id: str
@@ -48,10 +43,12 @@ class MessageRecord:
     reply_to_message_id: int | None = None
     reply_source_file: str | None = None
     forwarded_from: str | None = None
+    forwarded_datetime_raw: str | None = None
     links: tuple[LinkRef, ...] = field(default_factory=tuple)
     media: tuple[MediaRef, ...] = field(default_factory=tuple)
     message_type: MessageType = MessageType.MESSAGE
     is_service: bool = False
+    is_joined: bool = False
     source_locator: str = ""
     source_sha256: str = ""
     content_hash: str = ""

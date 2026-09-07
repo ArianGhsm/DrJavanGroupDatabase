@@ -10,13 +10,16 @@ from drjavanbot.domain import MessageRecord
 @dataclass(frozen=True, slots=True)
 class SearchQuery:
     raw_query: str
-    normalized_query: str
+    normalized_query: str = ""
     variants: tuple[str, ...] = field(default_factory=tuple)
     author: str | None = None
     date_from: datetime | None = None
     date_to: datetime | None = None
     candidate_limit: int = 120
     evidence_limit: int = 40
+    context_before: int | None = None
+    context_after: int | None = None
+    reply_depth: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +30,7 @@ class EvidenceCandidate:
     match_reasons: tuple[str, ...]
     context: tuple[MessageRecord, ...] = field(default_factory=tuple)
     cluster_key: str | None = None
+    cluster_size: int = 1
     duplicate_of: int | None = None
 
 

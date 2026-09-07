@@ -17,16 +17,10 @@ class ArchiveFile:
     page_number: int
     sha256: str
     size_bytes: int
+    logical_path: str | None = None
 
 
 class TelegramExportParser(Protocol):
-    """Stage-2 parser contract.
-
-    Implementations must be deterministic and must not mutate the source
-    archive. A parse failure must be explicit; callers must not commit a
-    partially parsed file into the last-known-good index.
-    """
-
     parser_version: str
 
     def parse_file(self, source: ArchiveFile) -> Iterable[MessageRecord]:

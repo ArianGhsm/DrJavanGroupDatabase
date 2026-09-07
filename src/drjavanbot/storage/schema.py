@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def schema_sql() -> str:
-    """SQLite schema contract for stage 2.
-
-    FTS is external-content so the canonical message row remains the source of
-    truth. Stage 2 must keep FTS synchronized transactionally.
-    """
     return r"""
 PRAGMA foreign_keys = ON;
 
@@ -19,7 +14,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 
 CREATE TABLE IF NOT EXISTS archive_files (
     path TEXT PRIMARY KEY,
-    page_number INTEGER NOT NULL,
+    page_number INTEGER NOT NULL UNIQUE,
     sha256 TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
     parser_version TEXT NOT NULL,
@@ -42,8 +37,10 @@ CREATE TABLE IF NOT EXISTS messages (
     reply_to_message_id INTEGER,
     reply_source_file TEXT,
     forwarded_from TEXT,
+    forwarded_datetime_raw TEXT,
     message_type TEXT NOT NULL,
     is_service INTEGER NOT NULL DEFAULT 0 CHECK (is_service IN (0, 1)),
+    is_joined INTEGER NOT NULL DEFAULT 0 CHECK (is_joined IN (0, 1)),
     source_locator TEXT NOT NULL,
     source_sha256 TEXT NOT NULL,
     content_hash TEXT NOT NULL,
@@ -57,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_datetime ON messages(datetime_utc);
 CREATE INDEX IF NOT EXISTS idx_messages_author ON messages(author_normalized);
 CREATE INDEX IF NOT EXISTS idx_messages_reply ON messages(reply_to_message_id);
 CREATE INDEX IF NOT EXISTS idx_messages_content_hash ON messages(content_hash);
+CREATE INDEX IF NOT EXISTS idx_messages_service ON messages(is_service);
 
 CREATE TABLE IF NOT EXISTS message_links (
     message_row_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -83,4 +81,23 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content_rowid='id',
     tokenize='unicode61 remove_diacritics 2'
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_vocab USING fts5vocab(messages_fts, 'row');
+
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, text_normalized, author_normalized, forwarded_from)
+    VALUES (new.id, new.text_normalized, new.author_normalized, new.forwarded_from);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, text_normalized, author_normalized, forwarded_from)
+    VALUES ('delete', old.id, old.text_normalized, old.author_normalized, old.forwarded_from);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, text_normalized, author_normalized, forwarded_from)
+    VALUES ('delete', old.id, old.text_normalized, old.author_normalized, old.forwarded_from);
+    INSERT INTO messages_fts(rowid, text_normalized, author_normalized, forwarded_from)
+    VALUES (new.id, new.text_normalized, new.author_normalized, new.forwarded_from);
+END;
 """

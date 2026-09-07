@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "groups": [
+    {"canonical": "root canal treatment", "terms": ["rct", "root canal", "root canal treatment", "endo", "endodontic treatment", "درمان ریشه", "عصب کشی", "عصب‌کشی"]},
+    {"canonical": "endodontics", "terms": ["endodontics", "endodontic", "endo", "اندو", "اندودانتیکس", "اندودنتیک"]},
+    {"canonical": "mta", "terms": ["mta", "mineral trioxide aggregate", "ام تی ای", "ام‌تی‌ای", "mta plug", "apical plug", "اپیکال پلاگ"]},
+    {"canonical": "vital pulp therapy", "terms": ["vpt", "vital pulp therapy", "pulpotomy", "پالپوتومی", "درمان پالپ زنده"]},
+    {"canonical": "regenerative endodontics", "terms": ["regeneration", "regenerative endodontics", "revascularization", "ریجنریشن", "ریواسکولاریزیشن"]},
+    {"canonical": "sensibility test", "terms": ["sensibility test", "sensibility tests", "vitality test", "pulp test", "تست حساسیت پالپ", "تست وایتالیتی"]},
+    {"canonical": "implant", "terms": ["implant", "dental implant", "ایمپلنت", "فیکسچر", "fixture"]},
+    {"canonical": "periodontics", "terms": ["perio", "periodontal", "periodontics", "پریو", "پریودنتال", "لثه"]},
+    {"canonical": "prosthodontics", "terms": ["prostho", "prosthodontics", "prosthodontic", "پروتز", "پروستودانتیکس"]},
+    {"canonical": "composite", "terms": ["composite", "resin composite", "کامپوزیت", "رزین کامپوزیت"]},
+    {"canonical": "amalgam", "terms": ["amalgam", "آمالگام"]},
+    {"canonical": "zirconia", "terms": ["zirconia", "zirconium oxide", "زیرکونیا", "زیرکونیوم"]},
+    {"canonical": "e.max", "terms": ["e.max", "emax", "e max", "ips e.max", "ایمکس", "ای مکس"]},
+    {"canonical": "npg alloy", "terms": ["npg", "npg alloy", "non precious gold colored alloy", "آلیاژ npg", "ان پی جی"]},
+    {"canonical": "cobalt chromium", "terms": ["co-cr", "cocr", "cobalt chromium", "chrome cobalt", "کروم کبالت", "کبالت کروم"]},
+    {"canonical": "leakage", "terms": ["leakage", "microleakage", "leaky", "لیکیج", "میکرولیکیج"]},
+    {"canonical": "crown", "terms": ["crown", "full coverage", "روکش", "کراون"]},
+    {"canonical": "veneer", "terms": ["veneer", "laminate veneer", "لامینیت", "ونیر"]},
+    {"canonical": "cone beam ct", "terms": ["cbct", "cone beam ct", "cone beam computed tomography", "سی بی سی تی"]},
+    {"canonical": "periapical radiograph", "terms": ["pa", "periapical", "periapical radiograph", "پری اپیکال", "رادیوگرافی پری اپیکال"]},
+    {"canonical": "local anesthesia", "terms": ["la", "local anesthesia", "local anaesthesia", "بی حسی موضعی", "بی‌حسی موضعی"]},
+    {"canonical": "temporomandibular joint", "terms": ["tmj", "temporomandibular joint", "مفصل گیجگاهی فکی", "مفصل فکی"]},
+    {"canonical": "occlusion", "terms": ["occlusion", "occlusal", "اکلوژن", "اکلوزال"]},
+    {"canonical": "glass ionomer", "terms": ["gic", "glass ionomer", "glass ionomer cement", "گلاس آینومر", "گلاس یونومر"]},
+    {"canonical": "calcium hydroxide", "terms": ["caoh2", "calcium hydroxide", "کلسیم هیدروکساید", "کلسیم هیدروکسید"]}
+  ]
+}
