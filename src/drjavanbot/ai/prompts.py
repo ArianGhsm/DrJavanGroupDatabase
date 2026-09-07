@@ -5,7 +5,7 @@ from typing import Sequence
 from .models import EvidencePack
 from .planner import SearchPlan
 
-PROMPT_VERSION = "archive-claim-grounding-v6-agentic-retrieval-preview"
+PROMPT_VERSION = "archive-claim-grounding-v7-agentic-facet-recheck"
 
 SEARCH_PLANNER_SYSTEM_PROMPT = """You are the high-recall search-planning component for a large Persian/English dentistry Telegram archive.
 Return JSON only. Do NOT answer the question and do NOT provide clinical facts.
@@ -87,6 +87,10 @@ Never copy example IDs; use only message_id values supplied in EVIDENCE."""
 
 SYNTHESIS_RETRY_SUFFIX = """
 RETRY INSTRUCTION: the previous structured result was invalid or incomplete. Re-scan all supplied primary/context evidence and return only the compact claim-grounded JSON schema above. Multiple archive messages may jointly answer the question. Every support quote must appear intact and in the same order inside claim.text; every additional substantive word must also occur in those supports. The user's question and model knowledge are not evidence. If you cannot satisfy this exactly, return {"insufficient_evidence":true,"claims":[]}.
+"""
+
+SYNTHESIS_INSUFFICIENT_RECHECK_SUFFIX = """
+SECOND-PASS ANSWERABILITY CHECK: your previous result was a syntactically valid insufficient_evidence answer, but local retrieval classified this as a faceted question and supplied multiple archive discussion/context messages. Re-read ALL EVIDENCE once before keeping that conclusion. In Telegram, the procedure/topic may be in one message while a nearby reply contains only a number, age, timing phrase, comparison, recommendation or short correction. If multiple supplied messages jointly answer the requested facet, create the smallest possible answer claim using their exact verbatim excerpts as supports. Do not infer an age, recommendation or fact that is absent from the quotes. If the exact supplied evidence still cannot support the requested facet, return {"insufficient_evidence":true,"claims":[]} again. This is a recheck for false-negative insufficiency, not permission to use model knowledge.
 """
 
 
