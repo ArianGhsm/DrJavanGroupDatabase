@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from drjavanbot.ai.orchestrator import MAX_LOGICAL_AI_CALLS
+from drjavanbot.ai.config import AIConfig
+from drjavanbot.ai.orchestrator import MAX_LOGICAL_AI_CALLS, _retrieval_preview
 from drjavanbot.ai.planner import (
     SearchFamily,
     SearchPlan,
@@ -143,6 +144,21 @@ def test_different_facets_in_neighbor_messages_bridge_into_one_discussion():
     assert any("conversation_bridge" in candidate.match_reasons for candidate in report.candidates[:3])
     assert any(candidate.context for candidate in report.candidates[:3])
     assert any(before >= 5 and after >= 6 for _, before, after in backend.context_calls)
+
+
+def test_retrieval_preview_is_bounded_real_archive_text_and_redacts_contact_data():
+    value = _candidate(
+        900,
+        20,
+        "ارتودنسی کودک؛ برای هماهنگی 09121234567 تماس بگیرید " + ("متن " * 300),
+        "A",
+    )
+    preview = _retrieval_preview("سن ارتودنسی کودک", (value,), AIConfig())
+    assert preview and preview[0]["message_id"] == 900
+    text = str(preview[0]["text"])
+    assert "09121234567" not in text
+    assert "شماره تماس حذف شد" in text
+    assert len(text) <= 705
 
 
 def test_ai_call_budget_preserves_planner_rescue_synthesis_and_one_repair():
