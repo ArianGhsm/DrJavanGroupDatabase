@@ -12,7 +12,7 @@ from drjavanbot.ai.orchestrator import ArchiveAnswerService
 from drjavanbot.ai.planner import SearchFamily, SearchPlan, parse_search_plan
 from drjavanbot.ai.planner_cache import SearchPlanCache
 from drjavanbot.ai.provider import RateLimitError, ProviderTimeoutError
-from drjavanbot.ai.retrieval import retrieve_with_plan
+from drjavanbot.ai.retrieval import assess_planned_retrieval, retrieve_with_plan
 from drjavanbot.domain import MessageRecord
 from drjavanbot.search import EvidenceCandidate
 from drjavanbot.search.terms import informative_query, informative_tokens
@@ -178,6 +178,25 @@ def test_planner_cache_is_bound_to_index_fingerprint(tmp_path: Path):
     assert third.ai_calls==2 and provider.calls[-2]["request_type"]=="search_plan"
 
 
+def test_malformed_planner_fallback_is_not_cached(tmp_path: Path):
+    evidence=tuple(_candidate(i, f"A{i}", f"کامپوزیت evidence {i}") for i in range(1, 6))
+    backend=RoutingBackend({"کامپوزیت":evidence})
+    cache=SearchPlanCache(tmp_path/"plans.sqlite3",ttl_seconds=3600)
+    provider=SequenceProvider(["not-json",_answer(),_plan(),_answer()])
+    service=ArchiveAnswerService(backend=backend,secret_store=Secrets(),config=AIConfig(),provider=provider,planner_cache=cache)
+
+    first=service.answer("برند کامپوزیت")
+    assert first.ai_calls==2
+    assert cache.stats()["entries"]==0
+
+    second=service.answer("برند کامپوزیت")
+    assert second.ai_calls==2
+    assert [call["request_type"] for call in provider.calls]==[
+        "search_plan","synthesis","search_plan","synthesis"
+    ]
+    assert cache.stats()["entries"]==1
+
+
 def test_planner_provider_timeout_and_rate_limit_do_not_loop():
     backend=RoutingBackend({})
     for error in (ProviderTimeoutError("timeout"),RateLimitError("rate")):
@@ -201,3 +220,22 @@ def test_multi_query_fusion_preserves_reply_context_and_diversifies_authors():
     assert report.candidates[0].context
     assert any("reply_context" in c.match_reasons for c in report.candidates)
     assert {c.message.author for c in report.candidates[:2]}=={"A","B"}
+
+
+def test_post_filter_duplicate_queries_do_not_fake_family_coverage():
+    evidence=(_candidate(1,"A","کامپوزیت اول"),_candidate(2,"B","کامپوزیت دوم"))
+    backend=RoutingBackend({"کامپوزیت":evidence})
+    plan=SearchPlan(
+        searchable=True,intent="recommendation",core_concepts=("کامپوزیت",),aliases=(),optional_concepts=("خوب",),
+        entity_types=("product",),query_families=(
+            SearchFamily("topic",("کامپوزیت",)),
+            SearchFamily("quality",("کامپوزیت خوب",)),
+        ),phrases=(),exclude_terms=(),low_information_terms=("خوب",),reply_context=True,
+    )
+    report=retrieve_with_plan(backend,plan)
+    assert report.query_runs==1
+    assert report.duplicate_queries_skipped==1
+    assert report.families_with_hits==1
+    assert all("family_coverage:1" in item.match_reasons for item in report.candidates)
+    needs_refinement,_=assess_planned_retrieval(report)
+    assert needs_refinement
