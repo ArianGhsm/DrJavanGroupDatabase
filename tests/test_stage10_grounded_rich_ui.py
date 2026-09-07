@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from urllib.parse import parse_qs
 
 from drjavanbot.ai.models import AnswerResult, ClaimSupport, GroundedClaim
@@ -32,10 +33,10 @@ def _answer(*, insufficient=False):
             insufficient_evidence=True, safety_note_if_needed=None,
         )
     support = ClaimSupport(1, "گروه دکتر جوان/messages.html#go_to_message1", "کامپوزیت X خوب بود")
-    claim = GroundedClaim("answer", "در پیام گروه، کامپوزیت X خوب توصیف شده است.", (support,))
+    claim = GroundedClaim("answer", "در پیام گروه، کامپوزیت X خوب بود", (support,))
     return AnswerResult(
         direct_answer=claim.text,
-        key_findings=("این جمع‌بندی از یک پیام گروه آمده است.",),
+        key_findings=(),
         disagreements=(), practical_conclusion=None,
         confidence="low", confidence_reason="پشتیبانی آرشیوی: 1 پیام از 1 نویسنده مستقل.",
         cited_message_ids=(1,), source_refs=(support.source_ref,), evidence_used_count=1, independent_authors_count=1,
@@ -47,8 +48,11 @@ def test_answer_renderer_visibly_makes_archive_the_only_authority():
     screen = answer_rich_screen(_answer())
     assert "جمع‌بندی پیام‌های گروه" in screen.rich_html
     assert "<blockquote>" in screen.rich_html
+    assert "عبارت‌های پشتیبان از گروه" in screen.rich_html
+    assert "کامپوزیت X خوب بود" in screen.rich_html
+    assert "پیام #1" in screen.rich_html
     assert "منبع پاسخ فقط آرشیو گروه دکتر جوان است" in screen.rich_html
-    assert "هوش مصنوعی فقط برای جست‌وجو و خلاصه‌سازی" in screen.rich_html
+    assert "هوش مصنوعی فقط برای جست‌وجو، انتخاب و چیدمان" in screen.rich_html
     chunks = answer_chunks(_answer())
     assert len(chunks) == 1 and isinstance(chunks[0], RichText)
 
@@ -69,6 +73,7 @@ def test_rich_text_uses_send_rich_message_with_rtl_payload():
     payload = json.loads(body["rich_message"][0])
     assert payload["is_rtl"] is True
     assert "جمع‌بندی پیام‌های گروه" in payload["html"]
+    assert "کامپوزیت X خوب بود" in payload["html"]
 
 
 def test_rich_send_failure_falls_back_to_legacy_html_without_repeating_business_logic():
@@ -84,6 +89,7 @@ def test_rich_send_failure_falls_back_to_legacy_html_without_repeating_business_
     fallback = parse_qs(transport.bodies[1].decode())["text"][0]
     assert fallback == str(rich)
     assert "جمع‌بندی پیام‌های گروه" in fallback
+    assert "کامپوزیت X خوب بود" in fallback
 
 
 def test_rich_ui_can_be_disabled_as_presentation_rollback():
@@ -106,6 +112,19 @@ def test_source_pagination_is_rich_capable_and_keeps_inline_actions_separate():
     assert total == 1 and isinstance(text, RichText)
     assert "پیام‌های منبع" in text.rich_html
     assert "کامپوزیت X خوب بود" in text.rich_html
+
+
+def test_source_pagination_accepts_object_records_as_well_as_dicts():
+    item = SimpleNamespace(
+        author="Dr A",
+        datetime="2026-01-01",
+        message_id=7,
+        source_file="گروه دکتر جوان/messages.html",
+        source_ref="گروه دکتر جوان/messages.html#go_to_message7",
+        text_excerpt="عبارت واقعی گروه",
+    )
+    text, total = sources_page([item], 0)
+    assert total == 1 and "عبارت واقعی گروه" in text.rich_html and "پیام #7" in text.rich_html
 
 
 def test_rich_ui_env_flag_is_strict(monkeypatch):
