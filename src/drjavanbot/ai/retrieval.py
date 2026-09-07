@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from typing import Sequence
 
+from drjavanbot.normalization import normalize_text
 from drjavanbot.search import EvidenceCandidate, SearchBackend, SearchQuery
 from drjavanbot.search.terms import informative_query
 from .planner import SearchPlan
@@ -14,6 +15,7 @@ class RetrievalReport:
     candidates: tuple[EvidenceCandidate, ...]
     query_runs: int
     families_with_hits: int
+    duplicate_queries_skipped: int = 0
 
 
 def retrieve_with_plan(
@@ -27,13 +29,25 @@ def retrieve_with_plan(
 
     The planner proposes what to look for; the local archive remains the only
     source of evidence. No planner string can become evidence on its own.
+
+    Query de-duplication happens *after* deterministic low-information filtering.
+    This matters because planner queries such as ``کامپوزیت`` and ``کامپوزیت خوب``
+    can collapse to the same lexical query. Counting both as independent families
+    would create false coverage and could incorrectly suppress adaptive refinement.
     """
     runs: list[tuple[str, tuple[EvidenceCandidate, ...]]] = []
     hit_families: set[str] = set()
+    seen_queries: set[str] = set()
+    duplicate_queries_skipped = 0
     for family_name, raw_query in plan.queries:
         query_text = informative_query(raw_query)
-        if not query_text:
+        query_key = normalize_text(query_text)
+        if not query_key:
             continue
+        if query_key in seen_queries:
+            duplicate_queries_skipped += 1
+            continue
+        seen_queries.add(query_key)
         result = tuple(
             backend.search(
                 SearchQuery(
@@ -53,6 +67,7 @@ def retrieve_with_plan(
         candidates=_fuse_runs(runs, limit=evidence_limit),
         query_runs=len(runs),
         families_with_hits=len(hit_families),
+        duplicate_queries_skipped=duplicate_queries_skipped,
     )
 
 
