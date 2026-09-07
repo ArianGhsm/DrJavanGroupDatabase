@@ -16,6 +16,7 @@ class TelegramConfig:
     source_session_ttl_seconds: int = 3600
     update_check_interval_seconds: int = 300
     rich_ui_enabled: bool = True
+    progress_ui_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "TelegramConfig":
@@ -28,6 +29,7 @@ class TelegramConfig:
             source_session_ttl_seconds=_int("DRJAVAN_TG_SOURCE_SESSION_TTL_SECONDS", 3600, 300, 86400),
             update_check_interval_seconds=_int("DRJAVAN_TG_UPDATE_CHECK_INTERVAL_SECONDS", 300, 60, 3600),
             rich_ui_enabled=_bool("DRJAVAN_TG_RICH_UI_ENABLED", True),
+            progress_ui_enabled=_bool("DRJAVAN_TG_PROGRESS_UI_ENABLED", True),
         )
 
 
