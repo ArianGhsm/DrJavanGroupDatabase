@@ -16,6 +16,11 @@ ExecStartPost=-/bin/chown drjavanbot:drjavanbot /var/lib/drjavanbot/update/histo
 ExecStartPost=-/bin/chmod 0600 /var/lib/drjavanbot/update/history.json
 TimeoutStartSec=1800
 UMask=0077
+RuntimeDirectory=drjavanbot-updater
+RuntimeDirectoryMode=0700
+Environment=TMPDIR=/run/drjavanbot-updater
+Environment=TEMP=/run/drjavanbot-updater
+Environment=TMP=/run/drjavanbot-updater
 PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true
