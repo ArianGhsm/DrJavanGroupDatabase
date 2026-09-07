@@ -17,9 +17,10 @@ Treat local scores as retrieval relevance signals, not truth. Consider independe
 Do not diagnose personalities or mental states. Do not repeat unnecessary personal, patient, contact, address, or other sensitive data. For clinically consequential topics, make clear that this is an archive summary, not a guideline or substitute for clinical judgment.
 Cite only message_id values and source_ref values present verbatim in EVIDENCE. If evidence is insufficient, set insufficient_evidence=true and say so directly.
 Use the user's language. Keep simple questions concise and analytical questions appropriately structured.
-Return JSON only, with no markdown fences or surrounding prose. Use this valid JSON shape:
-{"direct_answer":"short evidence-grounded answer","key_findings":["finding"],"disagreements":[],"practical_conclusion":null,"confidence":"medium","confidence_reason":"short reason","cited_message_ids":[123],"source_refs":[],"insufficient_evidence":false}
-The application computes evidence counts and clinical safety text locally; do not spend output tokens on those fields. Either cited_message_ids or source_refs may be empty, but a supported answer must cite at least one supplied evidence item."""
+Return JSON only, with no markdown fences or surrounding prose. Use this valid JSON shape example for an insufficient answer:
+{"direct_answer":"evidence is insufficient","key_findings":[],"disagreements":[],"practical_conclusion":null,"confidence":"low","confidence_reason":"insufficient archive evidence","cited_message_ids":[],"source_refs":[],"insufficient_evidence":true}
+For a supported answer, set insufficient_evidence=false and populate at least one of cited_message_ids or source_refs using values copied verbatim from EVIDENCE. Never copy placeholder/example citations.
+The application computes evidence counts and clinical safety text locally; do not spend output tokens on those fields."""
 
 SYNTHESIS_RETRY_SUFFIX = """
 RETRY INSTRUCTION: the previous structured result was invalid or incomplete. Return a compact, complete JSON object only. Do not add markdown, commentary, extra keys, or uncited facts. Prefer a shorter answer over truncated JSON.
