@@ -134,15 +134,34 @@ def _prepare_release(sha: str, python_exe: str) -> Path:
         _run(["git", "-C", str(CONTROL_REPO), "worktree", "add", "--detach", str(release), sha])
 
     venv = release / ".venv"
-    if not (venv / "bin/python").exists():
+    reused = _reuse_active_venv(release)
+    if not reused and not (venv / "bin/python").exists():
         shutil.rmtree(venv, ignore_errors=True)
         _run([python_exe, "-m", "venv", str(venv)])
 
     vpython = str(venv / "bin/python")
-    _pip_install(vpython, ["-r", "requirements.lock"], cwd=release)
-    _pip_install(vpython, ["-r", "requirements-dev.lock"], cwd=release)
+    if not reused:
+        _pip_install(vpython, ["-r", "requirements.lock"], cwd=release)
+        _pip_install(vpython, ["-r", "requirements-dev.lock"], cwd=release)
     _run([vpython, "-m", "pip", "install", "--no-deps", "."], cwd=release)
     return release
+
+
+def _reuse_active_venv(release: Path) -> bool:
+    active = _active_release()
+    if active is None or active == release:
+        return False
+    active_venv = active / ".venv"
+    if not (active_venv / "bin/python").exists():
+        return False
+    for name in ("requirements.lock", "requirements-dev.lock"):
+        if not ((active / name).is_file() and (release / name).is_file()):
+            return False
+        if (active / name).read_bytes() != (release / name).read_bytes():
+            return False
+    shutil.rmtree(release / ".venv", ignore_errors=True)
+    shutil.copytree(active_venv, release / ".venv", symlinks=True)
+    return True
 
 
 def _pip_install(python: str, args: list[str], *, cwd: Path) -> None:
