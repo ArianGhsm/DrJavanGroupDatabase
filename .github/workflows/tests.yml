@@ -42,6 +42,8 @@ jobs:
           test "$DRJAVAN_ARCHIVE_DIR" = "گروه دکتر جوان"
       - name: Test
         run: pytest -q
+      - name: Full archive semantic retrieval benchmark
+        run: drjavanbot --archive-dir "گروه دکتر جوان" semantic-benchmark --strict --top-k 12
       - name: Verify systemd unit syntax and fixed paths
         shell: bash
         run: |
