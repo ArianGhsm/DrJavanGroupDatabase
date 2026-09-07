@@ -29,17 +29,13 @@ def main() -> int:
         raise SystemExit("bootstrap must run as root")
 
     account, python_exe, sha = _preflight()
-
-    # Repair the known legacy unquoted archive path before *any* bootstrap tests or
-    # later manual smoke commands can source the runtime env. This mutation is
-    # intentionally kept even if a later bootstrap gate fails: it only normalizes
-    # DRJAVAN_ARCHIVE_DIR and preserves all other values/ownership/mode.
     _rewrite_env_archive_path()
 
     release = _prepare_release(sha, python_exe)
     _run_release_tests(release)
     (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
     os.chmod(release / ".deploy_commit", 0o644)
+    _make_release_runtime_readable(release)
 
     previous_release = _active_release()
     previous_units = _snapshot_units()
@@ -55,6 +51,7 @@ def main() -> int:
         _wait_service_active()
     except Exception:
         if switched and previous_release is not None and previous_release.exists():
+            _make_release_runtime_readable(previous_release)
             _switch_current(previous_release)
         _restore_units(previous_units)
         _run(["systemctl", "daemon-reload"], check=False)
@@ -112,6 +109,8 @@ def _verify_fts5(python_exe: str) -> None:
 
 def _prepare_release(sha: str, python_exe: str) -> Path:
     RELEASES.mkdir(parents=True, exist_ok=True)
+    os.chmod(CURRENT.parent, 0o755)
+    os.chmod(RELEASES, 0o755)
     release = RELEASES / sha
     if release.exists() and not _release_matches_sha(release, sha):
         _run(["git", "-C", str(CONTROL_REPO), "worktree", "remove", "--force", str(release)], check=False)
@@ -124,12 +123,44 @@ def _prepare_release(sha: str, python_exe: str) -> Path:
         shutil.rmtree(venv, ignore_errors=True)
         _run([python_exe, "-m", "venv", str(venv)])
 
-    # Always reconcile dependencies. This repairs a venv left half-installed by an interrupted bootstrap.
     vpython = str(venv / "bin/python")
     _run([vpython, "-m", "pip", "install", "-r", "requirements.lock"], cwd=release)
     _run([vpython, "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release)
     _run([vpython, "-m", "pip", "install", "--no-deps", "."], cwd=release)
     return release
+
+
+def _make_release_runtime_readable(release: Path) -> None:
+    """Root owns releases; drjavanbot gets read/execute only."""
+    if not release.is_dir():
+        raise RuntimeError("release directory missing")
+    os.chmod(CURRENT.parent, 0o755)
+    os.chmod(RELEASES, 0o755)
+    for root, dirs, files in os.walk(release, followlinks=False):
+        root_path = Path(root)
+        os.chmod(root_path, 0o755)
+        os.chown(root_path, 0, 0)
+        for name in dirs:
+            path = root_path / name
+            if path.is_symlink():
+                try:
+                    os.lchown(path, 0, 0)
+                except OSError:
+                    pass
+        for name in files:
+            path = root_path / name
+            if path.is_symlink():
+                try:
+                    os.lchown(path, 0, 0)
+                except OSError:
+                    pass
+                continue
+            mode = path.stat().st_mode
+            os.chmod(path, 0o755 if mode & 0o111 else 0o644)
+            os.chown(path, 0, 0)
+    entrypoint = release / ".venv/bin/drjavanbot-bot"
+    if not entrypoint.is_file() or not os.access(entrypoint, os.X_OK):
+        raise RuntimeError("release entrypoint is not executable")
 
 
 def _release_matches_sha(release: Path, sha: str) -> bool:
