@@ -46,11 +46,57 @@ def parse_json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
+def normalize_answer_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize harmless JSON-shape variations without inventing facts.
+
+    Grounding is still enforced later against the evidence pack. This function
+    only converts semantically equivalent scalar/list representations and fills
+    optional presentation fields with empty values.
+    """
+    out = dict(payload)
+    for name in ("key_findings", "disagreements", "source_refs"):
+        value = out.get(name)
+        if value is None:
+            out[name] = []
+        elif isinstance(value, str):
+            out[name] = [value]
+
+    ids = out.get("cited_message_ids")
+    if ids is None:
+        out["cited_message_ids"] = []
+    elif isinstance(ids, (int, str)) and not isinstance(ids, bool):
+        out["cited_message_ids"] = [ids]
+    if isinstance(out.get("cited_message_ids"), list):
+        normalized_ids: list[object] = []
+        for value in out["cited_message_ids"]:
+            if isinstance(value, str) and value.strip().isdigit():
+                normalized_ids.append(int(value.strip()))
+            else:
+                normalized_ids.append(value)
+        out["cited_message_ids"] = normalized_ids
+
+    insufficient = out.get("insufficient_evidence")
+    if isinstance(insufficient, str):
+        folded = insufficient.strip().casefold()
+        if folded == "true":
+            out["insufficient_evidence"] = True
+        elif folded == "false":
+            out["insufficient_evidence"] = False
+
+    out.setdefault("key_findings", [])
+    out.setdefault("disagreements", [])
+    out.setdefault("practical_conclusion", None)
+    out.setdefault("confidence_reason", "")
+    out.setdefault("safety_note_if_needed", None)
+    return out
+
+
 def validate_answer_payload(payload: dict[str, Any], pack: EvidencePack, *, question: str) -> AnswerResult:
+    payload = normalize_answer_payload(payload)
+    # Only fields that are essential to factual grounding are hard-required.
+    # Counts and safety text are computed deterministically by the application.
     required = {
-        "direct_answer", "key_findings", "disagreements", "practical_conclusion", "confidence",
-        "confidence_reason", "cited_message_ids", "source_refs", "evidence_used_count",
-        "independent_authors_count", "insufficient_evidence", "safety_note_if_needed",
+        "direct_answer", "confidence", "cited_message_ids", "source_refs", "insufficient_evidence",
     }
     missing = required - set(payload)
     if missing:
@@ -63,11 +109,11 @@ def validate_answer_payload(payload: dict[str, Any], pack: EvidencePack, *, ques
     confidence = _string(payload["confidence"], "confidence").casefold()
     if confidence not in _ALLOWED_CONFIDENCE:
         raise ModelOutputError("confidence must be high, medium or low")
-    confidence_reason = _string(payload["confidence_reason"], "confidence_reason")
+    confidence_reason = _optional_string(payload.get("confidence_reason"), "confidence_reason") or "میزان اتکا بر اساس شواهد ارجاع‌شده تعیین شد."
     insufficient = payload["insufficient_evidence"]
     if not isinstance(insufficient, bool):
         raise ModelOutputError("insufficient_evidence must be boolean")
-    safety = _optional_string(payload["safety_note_if_needed"], "safety_note_if_needed")
+    safety = _optional_string(payload.get("safety_note_if_needed"), "safety_note_if_needed")
 
     cited_ids = _int_list(payload["cited_message_ids"], "cited_message_ids", max_items=50)
     source_refs = _string_list(payload["source_refs"], "source_refs", max_items=50)
