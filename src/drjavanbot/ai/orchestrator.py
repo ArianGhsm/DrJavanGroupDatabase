@@ -125,6 +125,7 @@ class ArchiveAnswerService:
             max_output_tokens=budget.max_output_tokens,
             processor=lambda content: _validate_synthesis_content(content, pack, question),
         )
+        cacheable = True
         try:
             _, answer = self._call_processed(**synthesis_kwargs)
             ai_calls += 1
@@ -137,6 +138,7 @@ class ArchiveAnswerService:
                 ai_calls += 1
             except (ModelOutputError, CitationValidationError):
                 ai_calls += 1
+                cacheable = False
                 answer = _structured_output_failure_answer(ai_calls=ai_calls, expansion_used=expansion_used)
 
         answer = replace(
@@ -147,7 +149,7 @@ class ArchiveAnswerService:
             evidence_pack_estimated_tokens=pack.estimated_tokens,
         )
         # Do not cache a transient structured-output failure; a later retry may succeed.
-        if self.cache is not None and not answer.transient_failure:
+        if self.cache is not None and cacheable:
             self.cache.set(cache_key, answer)
         return answer
 
@@ -266,7 +268,6 @@ def _structured_output_failure_answer(*, ai_calls: int, expansion_used: bool) ->
         independent_authors_count=0, insufficient_evidence=True,
         safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
         expansion_used=expansion_used, evidence_pack_estimated_tokens=0,
-        transient_failure=True,
     )
 
 
