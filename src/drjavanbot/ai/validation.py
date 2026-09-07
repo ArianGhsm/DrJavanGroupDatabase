@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from drjavanbot.normalization import normalize_text
+from drjavanbot.normalization import normalize_text, tokenize
 from .models import AnswerResult, ClaimSupport, EvidencePack, GroundedClaim
 
 
@@ -19,6 +19,23 @@ _ALLOWED_CLAIM_KINDS = {"answer", "finding", "disagreement", "conclusion"}
 _MAX_CLAIMS = 10
 _MAX_SUPPORTS_PER_CLAIM = 4
 _MAX_QUOTE_CHARS = 360
+
+# These words may frame an archive statement without adding a new factual claim.
+# Substantive adjectives, comparisons, product properties, diagnoses, treatments,
+# numbers and technical terms are intentionally NOT included here.
+_NEUTRAL_CLAIM_TOKENS = frozenset(tokenize(
+    """
+    در از به با برای و یا که این آن همان یک
+    پیام پیامها پیام های گروه آرشیو
+    گفته شده است بود هست هستند باشد باشند
+    مطرح آمده ذکر نوشته اشاره کرده کرده اند
+    می شود میشود می شوند میشوند
+    طبق بر اساس فقط درباره مورد همچنین هم اما ولی
+    the a an in on from to with and or that this those
+    message messages group archive says said mentioned reported according
+    is are was were has have been
+    """
+))
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
@@ -67,12 +84,13 @@ def normalize_answer_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_answer_payload(payload: dict[str, Any], pack: EvidencePack, *, question: str) -> AnswerResult:
-    """Validate every displayable factual claim against an exact archive excerpt.
+    """Validate every displayable factual claim against exact archive excerpts.
 
-    The model does not get to assert global citations and then write arbitrary
-    prose. Every supported claim must name a supplied message and quote text that
-    is deterministically present in that exact evidence message. Aggregate source
-    IDs, source refs, evidence counts and confidence are all derived locally.
+    A model cannot use a global citation to justify arbitrary prose. Every claim
+    must name supplied archive messages, quote text that is literally present in
+    those messages, and keep all substantive claim vocabulary inside those
+    verified quotes. Aggregate source IDs, evidence counts and confidence are
+    derived locally rather than trusted from model output.
     """
     payload = normalize_answer_payload(payload)
     if "insufficient_evidence" not in payload:
@@ -92,7 +110,7 @@ def validate_answer_payload(payload: dict[str, Any], pack: EvidencePack, *, ques
             raise ModelOutputError("insufficient answer must not contain factual claims")
         return _insufficient_archive_answer(pack, question=question)
 
-    claims = tuple(_validate_claim(item, pack, question=question) for item in raw_claims)
+    claims = tuple(_validate_claim(item, pack) for item in raw_claims)
     if not claims:
         raise CitationValidationError("supported answer requires at least one grounded claim")
     if not any(item.kind == "answer" for item in claims):
@@ -146,7 +164,7 @@ def validate_answer_payload(payload: dict[str, Any], pack: EvidencePack, *, ques
     )
 
 
-def _validate_claim(value: Any, pack: EvidencePack, *, question: str) -> GroundedClaim:
+def _validate_claim(value: Any, pack: EvidencePack) -> GroundedClaim:
     if not isinstance(value, dict):
         raise ModelOutputError("each claim must be an object")
     kind = _string(value.get("kind"), "claim.kind").casefold()
@@ -173,7 +191,8 @@ def _validate_claim(value: Any, pack: EvidencePack, *, question: str) -> Grounde
     if not supports:
         raise CitationValidationError("claim has no valid archive support")
 
-    _validate_technical_tokens(text, supports, question=question)
+    _validate_technical_tokens(text, supports)
+    _validate_claim_vocabulary(text, supports)
     return GroundedClaim(kind=kind, text=text, supports=tuple(supports))
 
 
@@ -202,22 +221,40 @@ def _validate_support(value: Any, pack: EvidencePack) -> ClaimSupport:
     return ClaimSupport(message_id=raw_id, source_ref=item.source_ref, quote=quote.strip())
 
 
-def _validate_technical_tokens(text: str, supports: list[ClaimSupport], *, question: str) -> None:
-    """Reject invented Latin/product/number tokens absent from question and support.
+def _validate_technical_tokens(text: str, supports: list[ClaimSupport]) -> None:
+    """Reject any technical/product/number token absent from verified archive quotes.
 
-    Tokens are compared exactly after the same Persian/English normalization used
-    by retrieval. This prevents substring loopholes (for example 250 vs 2500) and
-    covers single-character model components and single-digit numbers too.
+    The user's question can guide search, but it is not evidence and therefore no
+    longer authorizes a product name, model or number in the final answer by
+    itself. Tokens are exact after normalization, preventing substring loopholes.
     """
-    permitted = _technical_tokens(question + " " + " ".join(item.quote for item in supports))
+    permitted = _technical_tokens(" ".join(item.quote for item in supports))
     introduced = _technical_tokens(text) - permitted
     if introduced:
         raise CitationValidationError("claim introduced a technical/product token absent from its archive support")
 
 
+def _validate_claim_vocabulary(text: str, supports: list[ClaimSupport]) -> None:
+    """Require every substantive claim word to come from its verified quotes.
+
+    This is deliberately stricter than semantic similarity. The model may add
+    only neutral framing words such as 'در پیام گروه ... مطرح شده است'. If it
+    adds 'بهترین', 'ضعیف', a treatment property, a recommendation, or any other
+    substantive word not present in support, validation fails closed.
+    """
+    claim_tokens = set(tokenize(text))
+    support_tokens = set(tokenize(" ".join(item.quote for item in supports)))
+    content_tokens = claim_tokens - _NEUTRAL_CLAIM_TOKENS
+    if not content_tokens:
+        raise CitationValidationError("claim contains no substantive archive-backed content")
+    introduced = content_tokens - support_tokens
+    if introduced:
+        raise CitationValidationError("claim introduced substantive vocabulary absent from its archive support")
+
+
 def _technical_tokens(value: str) -> set[str]:
     out: set[str] = set()
-    for token in normalize_text(value).split():
+    for token in tokenize(value):
         has_ascii_alpha = any("a" <= ch <= "z" for ch in token)
         has_digit = any(ch.isdigit() for ch in token)
         if has_ascii_alpha or has_digit:
