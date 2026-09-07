@@ -27,14 +27,20 @@ def build_evidence_pack(
     candidates: Sequence[EvidenceCandidate],
     config: AIConfig,
 ) -> EvidencePack:
-    """Pack diverse primary evidence first, then bounded explanatory context.
+    """Pack diverse anchors first, then bounded conversation context.
 
     Retrieval candidates are already ranked/diversified. Context must not undo
-    that work by letting the first thread consume the whole evidence budget.
-    When context exists, roughly one quarter of message slots and part of the
-    token budget are initially reserved for reply/context messages. Direct reply
-    parents are inserted before general neighborhood context because a short
-    reply can be meaningless without its parent.
+    that work by letting the first thread consume the whole evidence budget. At
+    the same time, a real archive discussion often spans several consecutive or
+    reply messages where only one message repeats the searched term. Retrieval
+    marks those anchors with ``discussion_window``. In that case we reserve up to
+    roughly one third of message slots for conversation context, while preserving
+    the same hard message/token ceilings.
+
+    Direct reply relations and nearest/topically-linked neighbors are consumed
+    before farther context. This improves conversation coverage without creating
+    any extra AI call or allowing context expansion to exceed the configured
+    evidence-token budget.
     """
     budget = config.budget_for(question)
     max_tokens = min(budget.max_evidence_tokens, config.hard_evidence_tokens)
@@ -44,9 +50,19 @@ def build_evidence_pack(
     used_tokens = estimate_tokens(question) + 120  # envelope/schema allowance
 
     has_context = any(candidate.context for candidate in candidates)
-    context_reserve = min(6, max(2, max_messages // 4)) if has_context and max_messages >= 4 else 0
+    discussion_heavy = sum(
+        1 for candidate in candidates[:12]
+        if "discussion_window" in set(candidate.match_reasons)
+    ) >= 2
+    if has_context and max_messages >= 4:
+        if discussion_heavy:
+            context_reserve = min(10, max(4, max_messages // 3))
+        else:
+            context_reserve = min(6, max(2, max_messages // 4))
+    else:
+        context_reserve = 0
     primary_soft_limit = max(1, max_messages - context_reserve)
-    primary_token_soft_cap = int(max_tokens * 0.78) if context_reserve else max_tokens
+    primary_token_soft_cap = int(max_tokens * (0.70 if discussion_heavy else 0.78)) if context_reserve else max_tokens
 
     selected: list[EvidenceCandidate] = []
     deferred_candidates: list[EvidenceCandidate] = []
@@ -93,30 +109,34 @@ def build_evidence_pack(
         reply_parent_refs.add(context.source_ref)
         used_tokens += cost
 
-    # Phase 3: distribute remaining neighborhood/reply-chain context round-robin
-    # across selected primaries instead of exhausting one thread at a time.
-    buckets: list[tuple[str, list]] = []
+    # Phase 3: distribute remaining conversation context round-robin across
+    # selected primaries. Each bucket is internally ordered so direct replies,
+    # nearest chronological neighbors and topical continuations beat distant
+    # messages when the token budget is tight.
+    buckets: list[tuple[EvidenceCandidate, list]] = []
     for candidate in selected:
         remaining = [
             ctx for ctx in candidate.context
             if ctx.source_locator and ctx.source_locator not in reply_parent_refs
         ]
+        remaining.sort(key=lambda record: _context_priority(record, candidate))
         if remaining:
-            buckets.append((candidate.message.source_locator, remaining))
+            buckets.append((candidate, remaining))
 
     while buckets and len(items) < max_messages:
         progressed = False
-        next_buckets: list[tuple[str, list]] = []
-        for parent_ref, records in buckets:
+        next_buckets: list[tuple[EvidenceCandidate, list]] = []
+        for candidate, records in buckets:
             if len(items) >= max_messages:
                 break
             record = records.pop(0)
             if record.source_locator in seen_refs:
                 if records:
-                    next_buckets.append((parent_ref, records))
+                    next_buckets.append((candidate, records))
                 continue
+            role = "reply_context" if record.reply_to_message_id == candidate.message.message_id else "context"
             context, cost = _fit_item(
-                _context_message(record, parent_ref=parent_ref, role="context"),
+                _context_message(record, parent_ref=candidate.message.source_locator, role=role),
                 max_tokens - used_tokens,
                 budget.per_context_chars,
             )
@@ -126,7 +146,7 @@ def build_evidence_pack(
                 used_tokens += cost
                 progressed = True
             if records:
-                next_buckets.append((parent_ref, records))
+                next_buckets.append((candidate, records))
         if not progressed:
             break
         buckets = next_buckets
@@ -201,6 +221,29 @@ def _context_message(record, *, parent_ref: str, role: str) -> EvidenceMessage:
         role=role,
         parent_source_ref=parent_ref,
     )
+
+
+def _context_priority(record, candidate: EvidenceCandidate) -> tuple[int, int, int, int, int]:
+    anchor = candidate.message
+    if record.message_id == anchor.reply_to_message_id or record.reply_to_message_id == anchor.message_id:
+        relation = 0
+    elif record.source_page == anchor.source_page:
+        relation = 1
+    else:
+        relation = 2
+
+    text = normalize_text(record.text_normalized or record.text_raw)
+    topical_hits = 0
+    for raw_term in candidate.matched_terms[:8]:
+        term = normalize_text(raw_term)
+        if term and term in text:
+            topical_hits += 1
+
+    if record.source_page == anchor.source_page:
+        distance = abs(record.source_order - anchor.source_order)
+    else:
+        distance = 10_000 + abs(record.source_page - anchor.source_page) * 100
+    return (relation, -topical_hits, distance, record.source_page, record.source_order)
 
 
 def _fit_item(item: EvidenceMessage, remaining_tokens: int, preferred_chars: int) -> tuple[EvidenceMessage | None, int]:
