@@ -235,9 +235,16 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
     relevance_proxy = (relevant / len(top)) if top and anchors else None
     irrelevant_proxy = (1.0 - relevance_proxy) if relevance_proxy is not None else None
 
+    # Recall proxy only needs the matching message locator. Avoid expensive
+    # before/after/reply context hydration for up to 160 anchor-pool candidates.
     anchor_pool: set[str] = set()
     for anchor in case.anchors[:8]:
-        for item in backend.search(SearchQuery(raw_query=anchor, evidence_limit=100, candidate_limit=160)):
+        for item in backend.search(SearchQuery(
+            raw_query=anchor,
+            evidence_limit=100,
+            candidate_limit=160,
+            include_context=False,
+        )):
             anchor_pool.add(item.message.source_locator)
     selected_refs = {item.message.source_locator for item in top}
     recall_proxy = (len(selected_refs & anchor_pool) / len(anchor_pool)) if anchor_pool else None
