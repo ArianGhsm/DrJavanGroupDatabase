@@ -37,9 +37,12 @@ class AIConfig:
     medium_messages: int = 26
     complex_messages: int = 40
     hard_messages: int = 40
-    simple_output_tokens: int = 450
-    medium_output_tokens: int = 750
-    complex_output_tokens: int = 1_100
+    # These are generation ceilings, not prepaid token usage. They are sized so
+    # the JSON envelope cannot be truncated merely because the question is short.
+    simple_output_tokens: int = 800
+    medium_output_tokens: int = 1_200
+    complex_output_tokens: int = 1_800
+    structured_retry_output_tokens: int = 2_400
 
     @classmethod
     def from_env(cls) -> "AIConfig":
@@ -62,6 +65,10 @@ class AIConfig:
             medium_evidence_tokens=_int_env("DRJAVAN_AI_MEDIUM_EVIDENCE_TOKENS", 5_000, 1_000, 9_000),
             complex_evidence_tokens=_int_env("DRJAVAN_AI_COMPLEX_EVIDENCE_TOKENS", 8_000, 1_500, 9_000),
             hard_evidence_tokens=_int_env("DRJAVAN_AI_HARD_EVIDENCE_TOKENS", 9_000, 2_000, 12_000),
+            simple_output_tokens=_int_env("DRJAVAN_AI_SIMPLE_OUTPUT_TOKENS", 800, 400, 4_000),
+            medium_output_tokens=_int_env("DRJAVAN_AI_MEDIUM_OUTPUT_TOKENS", 1_200, 500, 4_000),
+            complex_output_tokens=_int_env("DRJAVAN_AI_COMPLEX_OUTPUT_TOKENS", 1_800, 700, 6_000),
+            structured_retry_output_tokens=_int_env("DRJAVAN_AI_STRUCTURED_RETRY_OUTPUT_TOKENS", 2_400, 800, 6_000),
         )
 
     def budget_for(self, question: str) -> EvidenceBudget:
@@ -77,6 +84,7 @@ class AIConfig:
             self.model, self.reasoning_effort, self.simple_evidence_tokens, self.medium_evidence_tokens,
             self.complex_evidence_tokens, self.hard_evidence_tokens,
             self.simple_output_tokens, self.medium_output_tokens, self.complex_output_tokens,
+            self.structured_retry_output_tokens,
         ))
 
 
@@ -84,7 +92,7 @@ def classify_question(question: str) -> str:
     tokens = tokenize(question)
     analytical = {
         "بهترین", "بهتر", "مقایسه", "چرا", "اختلاف", "تجربه", "توصیه", "پیشنهاد",
-        "مزایا", "معایب", "کدام", "نظر", "نظرات", "جمع", "نتیجه", "compare", "why",
+        "مزایا", "معایب", "کدام", "کدوم", "نظر", "نظرات", "جمع", "نتیجه", "compare", "why",
         "best", "recommend", "experience", "versus", "vs",
     }
     hits = sum(1 for token in tokens if token in analytical)
