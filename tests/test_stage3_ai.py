@@ -150,9 +150,32 @@ def test_service_without_key_fails_before_synthesis():
     assert provider.calls==[]
 
 
-def test_malformed_synthesis_is_recorded_as_failed_ai_call():
-    backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")]); provider=MockProvider(["not json"])
+def test_malformed_synthesis_retries_once_then_returns_safe_result():
+    backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")]); provider=MockProvider(["not json","still not json"])
     with tempfile.TemporaryDirectory() as td:
-        telemetry=TelemetryStore(Path(td)/"usage.sqlite3"); service=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider,telemetry=telemetry)
-        with pytest.raises(ModelOutputError): service.answer("RCT")
-        s=telemetry.summary(); assert s.calls==1 and s.successes==0 and s.failures==1 and s.input_tokens==100
+        telemetry=TelemetryStore(Path(td)/"usage.sqlite3")
+        answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider,telemetry=telemetry).answer("RCT")
+        s=telemetry.summary()
+        assert answer.insufficient_evidence and answer.ai_calls==2 and len(provider.calls)==2
+        assert "دوباره" in answer.direct_answer and s.calls==2 and s.failures==2
+
+
+def test_malformed_synthesis_retry_can_recover():
+    backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")])
+    provider=MockProvider(["",json.dumps(valid_answer(),ensure_ascii=False)])
+    answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
+    assert answer.direct_answer=="جمع‌بندی مستند آرشیو" and answer.ai_calls==2 and len(provider.calls)==2
+
+
+def test_numeric_string_citation_ids_are_normalized_then_validated():
+    backend=MockBackend([candidate(1,"A","RCT"),candidate(2,"B","RCT")])
+    payload=valid_answer(); payload["cited_message_ids"]=["1","2"]
+    provider=MockProvider([json.dumps(payload,ensure_ascii=False)])
+    answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("RCT")
+    assert answer.cited_message_ids==(1,2) and answer.evidence_used_count==2
+
+
+def test_punctuation_only_question_never_calls_search_or_ai():
+    backend=MockBackend([]); provider=MockProvider([])
+    answer=ArchiveAnswerService(backend=backend,secret_store=MemorySecretStore(),config=AIConfig(),provider=provider).answer("؟؟؟؟")
+    assert answer.insufficient_evidence and answer.ai_calls==0 and provider.calls==[] and backend.calls==[]
