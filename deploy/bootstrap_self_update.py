@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import sqlite3
 import subprocess
 import tempfile
+import time
 
 CONTROL_REPO = Path("/opt/drjavanbot/app")
 RELEASES = Path("/opt/drjavanbot/releases")
@@ -18,22 +20,66 @@ SYSTEMD = Path("/etc/systemd/system")
 EXPECTED_REMOTES = {
     "https://github.com/ArianGhsm/DrJavanGroupDatabase.git",
     "https://github.com/ArianGhsm/DrJavanGroupDatabase",
-    "git@github.com:ArianGhsm/DrJavanGroupDatabase.git",
 }
+UNIT_NAMES = ("drjavanbot.service", "drjavanbot-updater.service", "drjavanbot-updater.path")
 
 
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("bootstrap must run as root")
+
+    account, python_exe, sha = _preflight()
+    release = _prepare_release(sha, python_exe)
+    _run_release_tests(release)
+    (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
+    os.chmod(release / ".deploy_commit", 0o644)
+
+    previous_release = _active_release()
+    previous_units = _snapshot_units()
+    switched = False
+    try:
+        _switch_current(release)
+        switched = True
+        _rewrite_env_archive_path()
+        _prepare_update_state(account, sha, previous_release)
+        _install_units()
+        _run(["systemctl", "daemon-reload"])
+        _run(["systemctl", "enable", "--now", "drjavanbot-updater.path"])
+        _run(["systemctl", "restart", "drjavanbot.service"])
+        _wait_service_active()
+    except Exception:
+        if switched and previous_release is not None and previous_release.exists():
+            _switch_current(previous_release)
+        _restore_units(previous_units)
+        _run(["systemctl", "daemon-reload"], check=False)
+        _run(["systemctl", "restart", "drjavanbot.service"], check=False)
+        raise
+
+    print(f"self-updater bootstrap complete at {sha[:12]}")
+    return 0
+
+
+def _preflight():
+    if not (CONTROL_REPO / ".git").exists():
+        raise SystemExit("control repository is missing")
     remote = _text(["git", "-C", str(CONTROL_REPO), "remote", "get-url", "origin"]).strip()
     if remote not in EXPECTED_REMOTES:
         raise SystemExit("unexpected repository origin")
-    sha = _text(["git", "-C", str(CONTROL_REPO), "rev-parse", "HEAD"]).strip()
+    dirty = _text(["git", "-C", str(CONTROL_REPO), "status", "--porcelain", "--untracked-files=no"]).strip()
+    if dirty:
+        raise SystemExit("control repository has tracked local modifications; refusing bootstrap")
+    if not ENV_FILE.is_file():
+        raise SystemExit("runtime env file is missing")
+    if not (CONTROL_REPO / "گروه دکتر جوان").is_dir():
+        raise SystemExit("archive directory is missing from control repository")
+    for name in UNIT_NAMES:
+        if not (CONTROL_REPO / "deploy" / name).is_file():
+            raise SystemExit(f"missing systemd unit: {name}")
+    try:
+        account = pwd.getpwnam("drjavanbot")
+    except KeyError as exc:
+        raise SystemExit("Unix user drjavanbot is missing") from exc
 
-    RELEASES.mkdir(parents=True, exist_ok=True)
-    release = RELEASES / sha
-    if not release.exists():
-        _run(["git", "-C", str(CONTROL_REPO), "worktree", "add", "--detach", str(release), sha])
     python_exe = shutil.which("python3.11") or shutil.which("python3")
     if not python_exe:
         raise SystemExit("Python 3.11+ is required")
@@ -41,80 +87,201 @@ def main() -> int:
     major, minor = (int(x) for x in version.split(".", 1))
     if (major, minor) < (3, 11):
         raise SystemExit("Python 3.11+ is required")
+    _verify_fts5(python_exe)
+    sha = _text(["git", "-C", str(CONTROL_REPO), "rev-parse", "HEAD"]).strip()
+    if len(sha) != 40:
+        raise SystemExit("unable to resolve repository HEAD")
+    return account, python_exe, sha
+
+
+def _verify_fts5(python_exe: str) -> None:
+    code = (
+        "import sqlite3; "
+        "c=sqlite3.connect(':memory:'); "
+        "c.execute('CREATE VIRTUAL TABLE t USING fts5(x)'); "
+        "c.close()"
+    )
+    _run([python_exe, "-c", code])
+
+
+def _prepare_release(sha: str, python_exe: str) -> Path:
+    RELEASES.mkdir(parents=True, exist_ok=True)
+    release = RELEASES / sha
+    if release.exists() and not _release_matches_sha(release, sha):
+        _run(["git", "-C", str(CONTROL_REPO), "worktree", "remove", "--force", str(release)], check=False)
+        shutil.rmtree(release, ignore_errors=True)
+    if not release.exists():
+        _run(["git", "-C", str(CONTROL_REPO), "worktree", "add", "--detach", str(release), sha])
 
     venv = release / ".venv"
     if not (venv / "bin/python").exists():
+        shutil.rmtree(venv, ignore_errors=True)
         _run([python_exe, "-m", "venv", str(venv)])
-        _run([str(venv / "bin/python"), "-m", "pip", "install", "-r", "requirements.lock"], cwd=release)
-        _run([str(venv / "bin/python"), "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release)
-        _run([str(venv / "bin/python"), "-m", "pip", "install", "--no-deps", "."], cwd=release)
 
-    # Never inherit a stale pytest temp tree from another/root process.
+    # Always reconcile dependencies. This repairs a venv left half-installed by an interrupted bootstrap.
+    vpython = str(venv / "bin/python")
+    _run([vpython, "-m", "pip", "install", "-r", "requirements.lock"], cwd=release)
+    _run([vpython, "-m", "pip", "install", "-r", "requirements-dev.lock"], cwd=release)
+    _run([vpython, "-m", "pip", "install", "--no-deps", "."], cwd=release)
+    return release
+
+
+def _release_matches_sha(release: Path, sha: str) -> bool:
+    try:
+        actual = _text(["git", "-C", str(release), "rev-parse", "HEAD"]).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return actual == sha
+
+
+def _run_release_tests(release: Path) -> None:
+    vpython = release / ".venv/bin/python"
     with tempfile.TemporaryDirectory(prefix="drjavanbot-bootstrap-", dir="/var/tmp") as temp_root:
         test_env = dict(os.environ)
         test_env.update({"TMPDIR": temp_root, "TEMP": temp_root, "TMP": temp_root})
+        _run([str(vpython), "-m", "compileall", "-q", "src", "deploy"], cwd=release, env=test_env)
         _run(
-            [str(venv / "bin/python"), "-m", "pytest", "-q", "--basetemp", str(Path(temp_root) / "pytest")],
+            [str(vpython), "-m", "pytest", "-q", "--basetemp", str(Path(temp_root) / "pytest")],
             cwd=release,
             env=test_env,
         )
-    (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
-
-    temp_link = CURRENT.parent / ".current.bootstrap"
-    temp_link.unlink(missing_ok=True)
-    os.symlink(release, temp_link)
-    os.replace(temp_link, CURRENT)
-
-    _rewrite_env_archive_path()
-    account = pwd.getpwnam("drjavanbot")
-    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-    os.chown(UPDATE_DIR, account.pw_uid, account.pw_gid)
-    os.chmod(UPDATE_DIR, 0o700)
-    _atomic_json(UPDATE_DIR / "history.json", [sha], uid=account.pw_uid, gid=account.pw_gid)
-
-    for name in ("drjavanbot.service", "drjavanbot-updater.service", "drjavanbot-updater.path"):
-        source = CONTROL_REPO / "deploy" / name
-        target = SYSTEMD / name
-        shutil.copy2(source, target)
-        os.chmod(target, 0o644)
-
-    _run(["systemctl", "daemon-reload"])
-    _run(["systemctl", "enable", "--now", "drjavanbot-updater.path"])
-    _run(["systemctl", "restart", "drjavanbot.service"])
-    _run(["systemctl", "is-active", "--quiet", "drjavanbot.service"])
-    print(f"self-updater bootstrap complete at {sha[:12]}")
-    return 0
 
 
 def _rewrite_env_archive_path() -> None:
+    stat = ENV_FILE.stat()
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
     key = "DRJAVAN_ARCHIVE_DIR="
-    # Keep this value valid for both systemd EnvironmentFile parsing and shell sourcing.
     replacement = key + '"/opt/drjavanbot/current/گروه دکتر جوان"'
-    found = False
-    output = []
+    output: list[str] = []
+    inserted = False
     for line in lines:
         if line.strip().startswith(key):
-            output.append(replacement)
-            found = True
-        else:
-            output.append(line)
-    if not found:
+            if not inserted:
+                output.append(replacement)
+                inserted = True
+            continue
+        output.append(line)
+    if not inserted:
         output.append(replacement)
-    mode = ENV_FILE.stat().st_mode & 0o777
+
     fd, temp = tempfile.mkstemp(prefix=".drjavanbot.env.", dir=ENV_FILE.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write("\n".join(output) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temp, mode or 0o600)
+        os.chmod(temp, stat.st_mode & 0o777 or 0o600)
+        os.chown(temp, stat.st_uid, stat.st_gid)
         os.replace(temp, ENV_FILE)
+        _fsync_directory(ENV_FILE.parent)
     finally:
         try:
             os.unlink(temp)
         except FileNotFoundError:
             pass
+
+
+def _prepare_update_state(account, sha: str, previous_release: Path | None) -> None:
+    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chown(UPDATE_DIR, account.pw_uid, account.pw_gid)
+    os.chmod(UPDATE_DIR, 0o700)
+    history_path = UPDATE_DIR / "history.json"
+    history = _read_history(history_path)
+    previous_sha = _release_marker(previous_release)
+    for value in (previous_sha, sha):
+        if value:
+            history = [item for item in history if item != value]
+            history.append(value)
+    _atomic_json(history_path, history[-10:], uid=account.pw_uid, gid=account.pw_gid)
+
+
+def _read_history(path: Path) -> list[str]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and len(item) == 40]
+
+
+def _release_marker(release: Path | None) -> str | None:
+    if release is None:
+        return None
+    marker = release / ".deploy_commit"
+    try:
+        value = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if len(value) == 40 else None
+
+
+def _active_release() -> Path | None:
+    if not CURRENT.is_symlink():
+        return None
+    try:
+        return CURRENT.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def _switch_current(release: Path) -> None:
+    CURRENT.parent.mkdir(parents=True, exist_ok=True)
+    temp_link = CURRENT.parent / ".current.bootstrap"
+    temp_link.unlink(missing_ok=True)
+    os.symlink(release, temp_link)
+    os.replace(temp_link, CURRENT)
+    _fsync_directory(CURRENT.parent)
+
+
+def _snapshot_units() -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for name in UNIT_NAMES:
+        target = SYSTEMD / name
+        try:
+            snapshot[name] = target.read_bytes()
+        except FileNotFoundError:
+            snapshot[name] = None
+    return snapshot
+
+
+def _install_units() -> None:
+    for name in UNIT_NAMES:
+        source = CONTROL_REPO / "deploy" / name
+        target = SYSTEMD / name
+        shutil.copy2(source, target)
+        os.chmod(target, 0o644)
+    _fsync_directory(SYSTEMD)
+
+
+def _restore_units(snapshot: dict[str, bytes | None]) -> None:
+    for name, content in snapshot.items():
+        target = SYSTEMD / name
+        if content is None:
+            target.unlink(missing_ok=True)
+        else:
+            target.write_bytes(content)
+            os.chmod(target, 0o644)
+
+
+def _wait_service_active() -> None:
+    deadline = time.monotonic() + 20
+    stable_since: float | None = None
+    while time.monotonic() < deadline:
+        active = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "drjavanbot.service"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode == 0
+        now = time.monotonic()
+        if active:
+            stable_since = stable_since or now
+            if now - stable_since >= 3:
+                return
+        else:
+            stable_since = None
+        time.sleep(0.5)
+    raise RuntimeError("drjavanbot.service did not remain active")
 
 
 def _atomic_json(path: Path, value, *, uid: int, gid: int) -> None:
@@ -127,11 +294,23 @@ def _atomic_json(path: Path, value, *, uid: int, gid: int) -> None:
         os.chmod(temp, 0o600)
         os.chown(temp, uid, gid)
         os.replace(temp, path)
+        _fsync_directory(path.parent)
     finally:
         try:
             os.unlink(temp)
         except FileNotFoundError:
             pass
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _text(cmd: list[str]) -> str:
@@ -142,8 +321,10 @@ def _run(
     cmd: list[str],
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
-) -> None:
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=True)
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=check)
 
 
 if __name__ == "__main__":
