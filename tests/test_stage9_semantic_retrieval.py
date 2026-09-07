@@ -126,13 +126,17 @@ def test_composite_search_plan_is_structured_multi_family_without_answering():
     assert "کامپوزیت" in plan.core_concepts and "product_or_brand" in plan.entity_types
 
 
-def test_normal_semantic_path_is_planner_plus_synthesis_only():
+def test_recommendation_path_gets_answerability_rescue_before_synthesis():
     evidence = (_candidate(1, "A", "کامپوزیت X تجربه خوبی داشت"), _candidate(2, "B", "کامپوزیت Y را استفاده کردم"))
     backend = RoutingBackend({"کامپوزیت": evidence, "composite": evidence})
-    provider = SequenceProvider([_plan(), _answer()])
+    provider = SequenceProvider([
+        _plan(),
+        json.dumps({"query_families": []}),
+        _answer(),
+    ])
     result = ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider).answer("کدوم برند کامپوزیت خوبه؟")
-    assert result.ai_calls == 2 and not result.expansion_used
-    assert [call["request_type"] for call in provider.calls] == ["search_plan", "synthesis"]
+    assert result.ai_calls == 3 and not result.expansion_used
+    assert [call["request_type"] for call in provider.calls] == ["search_plan", "search_refinement", "synthesis"]
     assert len(backend.calls) >= 2
     assert all("کدوم" not in call.raw_query and "خوبه" not in call.raw_query for call in backend.calls)
     assert result.grounded_claims and result.cited_message_ids == (1, 2)
@@ -146,7 +150,7 @@ def test_non_searchable_noise_stops_before_local_retrieval():
     assert backend.calls == [] and [c["request_type"] for c in provider.calls] == ["search_plan"]
 
 
-def test_weak_first_pass_uses_archive_vocabulary_refinement_and_hard_three_call_cap():
+def test_weak_first_pass_uses_archive_vocabulary_refinement_with_bounded_three_call_success():
     weak = (_candidate(9, "A", "کامپوزیت", score=2.0, context=(_record(10, "A", "ProductZ خیلی بهتر بود"),)),)
     strong = (_candidate(1, "A", "ProductZ تجربه من"), _candidate(2, "B", "ProductZ را پیشنهاد می‌کنم"))
     backend = RoutingBackend({"productz": strong, "کامپوزیت": weak})
@@ -163,7 +167,7 @@ def test_weak_first_pass_uses_archive_vocabulary_refinement_and_hard_three_call_
     assert any(term.casefold() == "productz" for term in refinement["observed_archive_vocabulary"])
 
 
-def test_weak_path_never_makes_fourth_call_for_malformed_synthesis():
+def test_weak_path_uses_one_fourth_call_to_repair_malformed_synthesis():
     weak = (_candidate(9, "A", "کامپوزیت", score=2.0),)
     strong = (_candidate(1, "A", "refined کامپوزیت"), _candidate(2, "B", "refined کامپوزیت"))
     backend = RoutingBackend({"refined": strong, "کامپوزیت": weak})
@@ -171,10 +175,27 @@ def test_weak_path_never_makes_fourth_call_for_malformed_synthesis():
         _plan(families=[{"name": "topic", "queries": ["کامپوزیت"]}]),
         json.dumps({"query_families": [{"name": "refined", "queries": ["refined"]}]}),
         "not-json",
+        _answer(),
     ])
     result = ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider).answer("کدوم برند کامپوزیت خوبه؟")
-    assert result.ai_calls == 3 and result.insufficient_evidence
-    assert len(provider.calls) == 3
+    assert result.ai_calls == 4 and not result.insufficient_evidence
+    assert len(provider.calls) == 4
+    assert [c["request_type"] for c in provider.calls] == ["search_plan", "search_refinement", "synthesis", "synthesis"]
+
+
+def test_weak_path_never_makes_fifth_call_after_failed_structured_repair():
+    weak = (_candidate(9, "A", "کامپوزیت", score=2.0),)
+    strong = (_candidate(1, "A", "refined کامپوزیت"), _candidate(2, "B", "refined کامپوزیت"))
+    backend = RoutingBackend({"refined": strong, "کامپوزیت": weak})
+    provider = SequenceProvider([
+        _plan(families=[{"name": "topic", "queries": ["کامپوزیت"]}]),
+        json.dumps({"query_families": [{"name": "refined", "queries": ["refined"]}]}),
+        "not-json",
+        "still-not-json",
+    ])
+    result = ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider).answer("کدوم برند کامپوزیت خوبه؟")
+    assert result.ai_calls == 4 and result.insufficient_evidence
+    assert len(provider.calls) == 4
 
 
 def test_malformed_planner_falls_back_and_refines_without_model_memory_as_evidence():
