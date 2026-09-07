@@ -40,6 +40,7 @@ from .telemetry import TelemetryStore
 from .validation import CitationValidationError, ModelOutputError, parse_json_object, validate_answer_payload
 
 MAX_LOGICAL_AI_CALLS = 3
+ProgressCallback = Callable[[str, dict[str, object]], None]
 
 
 class AIConfigurationError(RuntimeError):
@@ -72,10 +73,19 @@ class ArchiveAnswerService:
         self.planner_cache = planner_cache
         self.telemetry = telemetry
 
-    def answer(self, question: str) -> AnswerResult:
+    def answer(self, question: str, progress: ProgressCallback | None = None) -> AnswerResult:
+        """Answer from archive evidence while emitting only safe pipeline milestones.
+
+        ``progress`` is intentionally *not* a reasoning/chain-of-thought channel.
+        Events contain stage names and bounded operational counts only: number of
+        search families, retrieved messages, authors, context windows and evidence
+        items. Prompts, model reasoning, hidden analysis and unvalidated archive
+        text are never emitted through this callback.
+        """
         question = question.strip()
         normalized = normalize_text(question)
         if not normalized:
+            _emit_progress(progress, "no_evidence", reason="not_searchable")
             return _not_searchable_answer(ai_calls=0)
 
         index_version = _index_fingerprint(self.backend)
@@ -83,6 +93,12 @@ class ArchiveAnswerService:
         if self.cache is not None:
             cached = self.cache.get(cache_key)
             if cached is not None:
+                _emit_progress(
+                    progress,
+                    "cache_hit",
+                    evidence_used=int(cached.evidence_used_count),
+                    authors=int(cached.independent_authors_count),
+                )
                 return cached.with_runtime(cache_hit=True, ai_calls=0)
 
         api_key = self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
@@ -94,6 +110,7 @@ class ArchiveAnswerService:
         planner_key = _planner_cache_key(normalized, index_version, self.config)
         plan = self.planner_cache.get(planner_key, question=question) if self.planner_cache is not None else None
         if plan is None:
+            _emit_progress(progress, "planning", cached=False)
             ai_calls += 1
             planner_cacheable = True
             try:
@@ -117,19 +134,35 @@ class ArchiveAnswerService:
             assert isinstance(plan, SearchPlan)
             if self.planner_cache is not None and planner_cacheable:
                 self.planner_cache.set(planner_key, plan)
+        else:
+            _emit_progress(progress, "planning", cached=True)
 
         if not plan.searchable:
+            _emit_progress(progress, "no_evidence", reason="planner_not_searchable")
             answer = _not_searchable_answer(ai_calls=ai_calls)
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
             return answer
 
+        _emit_progress(
+            progress,
+            "searching",
+            query_count=len(plan.queries),
+            family_count=len(plan.query_families),
+        )
         report = retrieve_with_plan(self.backend, plan)
+        _emit_retrieval_progress(progress, report, refined=False)
         needs_refinement, _ = assess_planned_retrieval(report)
 
         # Reserve one logical call for final synthesis. The whole request has a
         # hard ceiling of three AI calls, including malformed-output repair.
         if needs_refinement and ai_calls < MAX_LOGICAL_AI_CALLS - 1:
+            _emit_progress(
+                progress,
+                "refining",
+                candidate_count=len(report.candidates),
+                author_count=_candidate_author_count(report.candidates),
+            )
             observed = observed_vocabulary(report.candidates, question=question)
             corpus_hints = _corpus_hints(self.backend, plan, observed)
             ai_calls += 1
@@ -147,10 +180,19 @@ class ArchiveAnswerService:
             if families:
                 refinement_used = True
                 plan = plan.with_added_families(families)
+                _emit_progress(
+                    progress,
+                    "searching",
+                    query_count=len(plan.queries),
+                    family_count=len(plan.query_families),
+                    refined=True,
+                )
                 report = retrieve_with_plan(self.backend, plan)
+                _emit_retrieval_progress(progress, report, refined=True)
 
         candidates = report.candidates
         if not candidates:
+            _emit_progress(progress, "no_evidence", reason="no_candidates")
             answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used)
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
@@ -158,14 +200,24 @@ class ArchiveAnswerService:
 
         pack = build_evidence_pack(question, candidates, self.config)
         if not pack.messages:
+            _emit_progress(progress, "no_evidence", reason="empty_evidence_pack")
             answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used)
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
             return answer
 
         if ai_calls >= MAX_LOGICAL_AI_CALLS:
+            _emit_progress(progress, "validation_failed", ai_calls=ai_calls)
             return _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
 
+        evidence_authors = len({m.author for m in pack.messages if m.author})
+        _emit_progress(
+            progress,
+            "synthesizing",
+            evidence_messages=len(pack.messages),
+            evidence_authors=evidence_authors,
+            estimated_tokens=pack.estimated_tokens,
+        )
         budget = self.config.budget_for(question)
         synthesis_kwargs = dict(
             request_type="synthesis",
@@ -174,6 +226,12 @@ class ArchiveAnswerService:
             user_prompt=synthesis_user_prompt(pack, plan=plan),
             max_output_tokens=budget.max_output_tokens,
             processor=lambda content: _validate_synthesis_content(content, pack, question),
+            before_process=lambda: _emit_progress(
+                progress,
+                "validating",
+                evidence_messages=len(pack.messages),
+                evidence_authors=evidence_authors,
+            ),
         )
         cacheable = True
         ai_calls += 1
@@ -184,6 +242,7 @@ class ArchiveAnswerService:
             # already used planner+refinement and therefore never makes call #4.
             if ai_calls >= MAX_LOGICAL_AI_CALLS:
                 cacheable = False
+                _emit_progress(progress, "validation_failed", ai_calls=ai_calls)
                 answer = _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
             else:
                 retry_tokens = max(
@@ -193,6 +252,7 @@ class ArchiveAnswerService:
                         max(budget.max_output_tokens * 2, 1_200),
                     ),
                 )
+                _emit_progress(progress, "repairing", ai_calls=ai_calls + 1)
                 retry_kwargs = dict(synthesis_kwargs)
                 retry_kwargs["system_prompt"] = SYNTHESIS_SYSTEM_PROMPT + SYNTHESIS_RETRY_SUFFIX
                 retry_kwargs["max_output_tokens"] = retry_tokens
@@ -201,6 +261,7 @@ class ArchiveAnswerService:
                     _, answer = self._call_processed(**retry_kwargs)
                 except (ModelOutputError, CitationValidationError):
                     cacheable = False
+                    _emit_progress(progress, "validation_failed", ai_calls=ai_calls)
                     answer = _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
 
         answer = replace(
@@ -212,6 +273,13 @@ class ArchiveAnswerService:
         )
         if self.cache is not None and cacheable:
             self.cache.set(cache_key, answer)
+        _emit_progress(
+            progress,
+            "done",
+            evidence_used=int(answer.evidence_used_count),
+            authors=int(answer.independent_authors_count),
+            insufficient=bool(answer.insufficient_evidence),
+        )
         return answer
 
     def _call_processed(
@@ -223,6 +291,7 @@ class ArchiveAnswerService:
         user_prompt: str,
         max_output_tokens: int,
         processor: Callable[[str], object],
+        before_process: Callable[[], None] | None = None,
     ) -> tuple[ProviderResult, object]:
         started = time.perf_counter()
         result: ProviderResult | None = None
@@ -234,6 +303,8 @@ class ArchiveAnswerService:
                 user_prompt=user_prompt,
                 max_output_tokens=max_output_tokens,
             )
+            if before_process is not None:
+                before_process()
             processed = processor(result.content)
         except Exception as exc:
             if self.telemetry is not None:
@@ -255,6 +326,37 @@ class ArchiveAnswerService:
                 usage=result.usage,
             )
         return result, processed
+
+
+def _emit_progress(progress: ProgressCallback | None, stage: str, **details: object) -> None:
+    if progress is None:
+        return
+    try:
+        progress(stage, dict(details))
+    except Exception:
+        # Telegram/UI progress is observational only. It must never fail the
+        # evidence pipeline or trigger a duplicate provider/search operation.
+        return
+
+
+def _emit_retrieval_progress(progress: ProgressCallback | None, report, *, refined: bool) -> None:
+    _emit_progress(
+        progress,
+        "context",
+        candidate_count=len(report.candidates),
+        author_count=_candidate_author_count(report.candidates),
+        context_hydrated=int(getattr(report, "context_hydrated", 0)),
+        discussion_windows=int(getattr(report, "discussion_windows", 0)),
+        refined=bool(refined),
+    )
+
+
+def _candidate_author_count(candidates) -> int:
+    return len({
+        candidate.message.author_normalized or candidate.message.author
+        for candidate in tuple(candidates)[:20]
+        if candidate.message.author_normalized or candidate.message.author
+    })
 
 
 def _validate_synthesis_content(content: str, pack, question: str) -> AnswerResult:
