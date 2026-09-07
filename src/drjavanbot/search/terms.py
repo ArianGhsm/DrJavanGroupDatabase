@@ -18,14 +18,26 @@ _LOW_INFORMATION_TOKENS = frozenset(
     )
 )
 _LATIN_RE = re.compile(r"[a-z]", re.IGNORECASE)
+_SINGLE_LATIN_RE = re.compile(r"^[a-z]$", re.IGNORECASE)
+_LATIN_ALNUM_RE = re.compile(r"[a-z0-9]", re.IGNORECASE)
 
 
 def informative_tokens(value: str | None) -> tuple[str, ...]:
-    """Return stable topical tokens while suppressing question/filler words."""
+    """Return stable topical tokens while suppressing question/filler words.
+
+    Single-character tokens are normally noise. A single Latin letter is retained
+    only when immediately adjacent to another informative Latin/alphanumeric token,
+    preserving common compound notation such as ``e.max`` -> ``e max`` and
+    ``x-ray`` -> ``x ray`` without re-admitting Persian conjunctions or English
+    articles such as ``a``.
+    """
+    tokens = tokenize(value)
     out: list[str] = []
     seen: set[str] = set()
-    for token in tokenize(value):
-        if token in _LOW_INFORMATION_TOKENS or len(token) <= 1 or token in seen:
+    for index, token in enumerate(tokens):
+        if token in _LOW_INFORMATION_TOKENS or token in seen:
+            continue
+        if len(token) <= 1 and not _meaningful_single_latin(tokens, index):
             continue
         seen.add(token)
         out.append(token)
@@ -70,6 +82,21 @@ def distinctive_terms(values: Iterable[str | None], *, exclude: Iterable[str] = 
         ),
     )
     return tuple(ranked[: max(1, min(limit, 64))])
+
+
+def _meaningful_single_latin(tokens: tuple[str, ...], index: int) -> bool:
+    token = tokens[index]
+    if token in _LOW_INFORMATION_TOKENS or not _SINGLE_LATIN_RE.fullmatch(token):
+        return False
+    for neighbor_index in (index - 1, index + 1):
+        if not 0 <= neighbor_index < len(tokens):
+            continue
+        neighbor = tokens[neighbor_index]
+        if neighbor in _LOW_INFORMATION_TOKENS or len(neighbor) < 2:
+            continue
+        if _LATIN_ALNUM_RE.search(neighbor):
+            return True
+    return False
 
 
 __all__ = ["distinctive_terms", "informative_query", "informative_tokens", "is_low_information_token"]
