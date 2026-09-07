@@ -150,6 +150,12 @@ def test_staged_sqlite_is_promoted_without_second_production_reindex(tmp_path, m
     assert 'CURRENT / ".venv/bin/drjavanbot"), "reindex"' not in update_body
 
 
+def test_bootstrap_serializes_with_path_triggered_updater():
+    body = (ROOT / "deploy/bootstrap_self_update.py").read_text(encoding="utf-8")
+    assert 'LOCK_FILE = Path("/run/lock/drjavanbot-updater.lock")' in body
+    assert "fcntl.flock(lock.fileno(), fcntl.LOCK_EX)" in body
+
+
 def test_bootstrap_publishes_release_before_switch():
     source = (ROOT / "deploy/bootstrap_self_update.py").read_text(encoding="utf-8")
     main_body = source.split("def main()", 1)[1].split("def _preflight", 1)[0]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 from pathlib import Path
 import pwd
@@ -22,11 +23,20 @@ EXPECTED_REMOTES = {
     "https://github.com/ArianGhsm/DrJavanGroupDatabase",
 }
 UNIT_NAMES = ("drjavanbot.service", "drjavanbot-updater.service", "drjavanbot-updater.path")
+LOCK_FILE = Path("/run/lock/drjavanbot-updater.lock")
 
 
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("bootstrap must run as root")
+
+    # Bootstrap and the path-triggered updater share one lock.  Without this
+    # coordination a manual bootstrap can switch ``current`` while an older
+    # updater process is still running; that process may then stop the newly
+    # selected service after its long reindex, leaving the bot offline.
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock = LOCK_FILE.open("a+")
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
 
     account, python_exe, sha = _preflight()
     _rewrite_env_archive_path()
