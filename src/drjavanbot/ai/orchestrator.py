@@ -95,6 +95,7 @@ class ArchiveAnswerService:
         plan = self.planner_cache.get(planner_key, question=question) if self.planner_cache is not None else None
         if plan is None:
             ai_calls += 1
+            planner_cacheable = True
             try:
                 _, parsed = self._call_processed(
                     request_type="search_plan",
@@ -108,9 +109,13 @@ class ArchiveAnswerService:
             except (ModelOutputError, CitationValidationError):
                 # Structured planner failure is not allowed to become a user-facing
                 # crash. The fallback contains only deterministic question tokens.
+                # Do not cache this degraded plan: a transient malformed model
+                # response must not pin the same question to fallback retrieval for
+                # the full planner-cache TTL.
                 plan = deterministic_fallback_plan(question)
+                planner_cacheable = False
             assert isinstance(plan, SearchPlan)
-            if self.planner_cache is not None:
+            if self.planner_cache is not None and planner_cacheable:
                 self.planner_cache.set(planner_key, plan)
 
         if not plan.searchable:
@@ -343,6 +348,9 @@ def _insufficient_answer(*, ai_calls: int, refinement_used: bool) -> AnswerResul
         confidence="low", confidence_reason="جست‌وجوی معنایی و محلی evidence کافی پیدا نکرد.",
         cited_message_ids=(), source_refs=(), evidence_used_count=0,
         independent_authors_count=0, insufficient_evidence=True,
-        safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
-        expansion_used=refinement_used, evidence_pack_estimated_tokens=0,
+        safety_note_if_needed=None,
+        cache_hit=False,
+        ai_calls=ai_calls,
+        expansion_used=refinement_used,
+        evidence_pack_estimated_tokens=0,
     )
