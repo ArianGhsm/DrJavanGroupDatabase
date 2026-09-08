@@ -198,17 +198,16 @@ def test_weak_path_never_makes_fifth_call_after_failed_structured_repair():
     assert len(provider.calls) == 4
 
 
-def test_malformed_planner_falls_back_and_refines_without_model_memory_as_evidence():
+def test_malformed_planner_falls_back_to_direct_policy_without_model_memory_as_evidence():
     evidence = (_candidate(1, "A", "کامپوزیت واقعی آرشیو"), _candidate(2, "B", "کامپوزیت واقعی دوم"))
-    backend = RoutingBackend({"کامپوزیت": evidence, "برند کامپوزیت": evidence, "refined": evidence})
+    backend = RoutingBackend({"کامپوزیت": evidence, "برند کامپوزیت": evidence})
     provider = SequenceProvider([
         "not-json",
-        json.dumps({"query_families": [{"name": "refined", "queries": ["refined"]}]}),
-        _answer(),
+        _answer(text="کامپوزیت", supports=((1, "کامپوزیت"),)),
     ])
     result = ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider).answer("برند کامپوزیت")
-    assert result.ai_calls == 3 and not result.insufficient_evidence
-    assert [c["request_type"] for c in provider.calls] == ["search_plan", "search_refinement", "synthesis"]
+    assert result.ai_calls == 2 and not result.insufficient_evidence
+    assert [c["request_type"] for c in provider.calls] == ["search_plan", "synthesis"]
 
 
 def test_planner_cache_is_bound_to_index_fingerprint(tmp_path: Path):
@@ -231,7 +230,8 @@ def test_malformed_planner_fallback_is_not_cached(tmp_path: Path):
     evidence = tuple(_candidate(i, f"A{i}", f"کامپوزیت evidence {i}") for i in range(1, 6))
     backend = RoutingBackend({"کامپوزیت": evidence})
     cache = SearchPlanCache(tmp_path / "plans.sqlite3", ttl_seconds=3600)
-    provider = SequenceProvider(["not-json", _answer(), _plan(), _answer()])
+    exact_answer = _answer(text="کامپوزیت", supports=((1, "کامپوزیت"),))
+    provider = SequenceProvider(["not-json", exact_answer, _plan(), exact_answer])
     service = ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider, planner_cache=cache)
 
     first = service.answer("برند کامپوزیت")
