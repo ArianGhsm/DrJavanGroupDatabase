@@ -8,6 +8,7 @@ from .discussion_features import (
 )
 from .discussion_links import _direct_reply_related, _same_page_distance
 
+
 def _make_discussion(
     states: Sequence[_HitState],
     *,
@@ -62,6 +63,9 @@ def _make_discussion(
     if present_anchors:
         score += 1.35
         reasons.add("discussion_topic_anchor")
+        # Backward-compatible aliases remain useful to the existing orchestrator
+        # and telemetry while the richer discussion_* reasons carry the v2 detail.
+        reasons.add("anchor_family_hit")
     elif anchor_exists:
         score -= 1.75
         reasons.add("discussion_unanchored_penalty")
@@ -75,9 +79,16 @@ def _make_discussion(
     if len(family_names) > 1:
         score += 0.24 * min(4, len(family_names) - 1)
         reasons.add(f"discussion_family_coverage:{len(family_names)}")
+    if present_anchors and facet_families:
+        # Legacy name: this now means a facet family was actually co-located
+        # inside a topic-anchored discussion, not merely somewhere nearby globally.
+        reasons.add("conversation_bridge")
     if reply_edges:
         score += min(0.75, 0.42 + 0.10 * (reply_edges - 1))
         reasons.add("discussion_reply_edge")
+        reasons.add("reply_context")
+    elif representative_state.candidate.message.reply_to_message_id is not None:
+        reasons.add("reply_context")
     if proximity_edges:
         score += min(0.45, 0.14 + 0.06 * (proximity_edges - 1))
         reasons.add("discussion_proximity")
