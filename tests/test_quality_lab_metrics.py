@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 
 from drjavanbot.ai.eval.runner import evaluate_case
 from drjavanbot.ai.eval.schema import GoldenCase
@@ -19,6 +20,11 @@ def _record(mid: int, page: int, order: int, text: str, author: str = "A") -> Me
 
 def _candidate(mid: int, page: int, order: int, text: str, author: str = "A") -> EvidenceCandidate:
     return EvidenceCandidate(_record(mid, page, order, text, author), 8.0, (), ("exact_phrase",))
+
+
+def _position_hash(page: int, order: int) -> str:
+    raw_key = f"p{page}:b{order // 12}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
 
 
 class _Backend:
@@ -80,6 +86,29 @@ def test_context_only_topic_and_direct_facet_in_same_bundle_is_recovered():
     assert report.context_only_recovery_rate == 1.0
     assert report.author_diversity == 1
     assert report.relevant_discussion_hashes
+
+
+def test_frozen_gold_matches_any_admitted_member_of_same_discussion_bundle():
+    # The v2 retriever may choose a different representative than BASE while
+    # retaining the BASE representative as an admitted discussion member/context.
+    # Quality Lab must compare the frozen gold against the discussion bundle, not
+    # only against the newly chosen representative position.
+    representative = _candidate(1, 4, 37, "age 8", "A")
+    base_member = _record(9, 4, 11, "ortho", "B")
+    case = GoldenCase(
+        case_id="gold_bundle", category="age_timing_population", question="ortho age",
+        expectation="present", query_families=(("topic", ("ortho",)), ("age", ("age",))),
+        topic_anchors=("ortho",), required_facets=(("age", "year"),), known_answerable=True,
+        gold_discussion_hashes=(_position_hash(4, 11),),
+    )
+    report = evaluate_case(
+        _Backend({"ortho": (representative,), "age": (representative,)}, context=(base_member,)),
+        case,
+        top_k=8,
+    )
+    assert report.gate_passed
+    assert report.discussion_recall_at_k == 1.0
+    assert _position_hash(4, 11) in report.relevant_discussion_hashes
 
 
 def test_absent_case_allows_irrelevant_fallback_candidates_but_not_supported_evidence():
