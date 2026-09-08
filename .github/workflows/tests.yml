@@ -57,9 +57,6 @@ jobs:
           path: quality-lab-report.json
           if-no-files-found: warn
           retention-days: 14
-      - name: One-time Brain v2 legacy semantic benchmark migration QA
-        run: |
-          drjavanbot --archive-dir "گروه دکتر جوان" semantic-benchmark --strict --top-k 12
       - name: Verify systemd unit syntax and fixed paths
         shell: bash
         run: |
