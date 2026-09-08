@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Iterable, Sequence
+from typing import Iterable, Sequence
 
 from drjavanbot.normalization import normalize_text
 
@@ -10,7 +10,7 @@ from .models import AnswerResult, ClaimSupport, EvidencePack, GroundedClaim
 from .validation import CitationValidationError, ModelOutputError, parse_json_object
 
 
-VALIDATION_SEMANTICS_VERSION = "claim-support-validation-v2.1"
+VALIDATION_SEMANTICS_VERSION = "claim-support-validation-v2.2"
 _ALLOWED_KINDS = {"answer", "finding", "disagreement", "conclusion"}
 _NEGATION_RE = re.compile(r"(?:\bnot\b|\bno\b|\bnever\b|نیست|نبود|نمی|نکن|ندارد|نداره|بدون)", re.IGNORECASE)
 _COMPARISON_MARKERS = (
@@ -25,8 +25,8 @@ _NUMBER_RE = re.compile(r"(?<![\w])[-+]?\d+(?:[.,٫]\d+)?(?:\s*[%٪])?(?![\w])|[
 _LATIN_OR_MODEL_RE = re.compile(r"\b(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*(?:\d|[A-Z]))[A-Za-z][A-Za-z0-9_-]*\b")
 _TOKEN_RE = re.compile(r"[\w\u0600-\u06FF]+", re.UNICODE)
 _FRAMING = {
-    "در", "گروه", "پیام", "پیامها", "پیام‌های", "گفته", "شده", "است", "بود", "هست", "مطرح",
-    "طبق", "بر اساس", "آرشیو", "این", "آن", "یک", "هم", "و", "یا", "که", "از", "به", "برای",
+    "در", "گروه", "پیام", "پیامها", "پیام‌های", "های", "هایی", "گفته", "شده", "شد", "است", "بود", "هست", "مطرح",
+    "طبق", "بر اساس", "آرشیو", "این", "آن", "یک", "هم", "و", "یا", "که", "از", "به", "برای", "را",
     "the", "a", "an", "in", "archive", "message", "messages", "group", "was", "is", "were",
 }
 _CORRECTION_MARKERS = ("اصلاح", "اشتباه", "درستش", "برعکس", "اما", "ولی", "نه ", "correction", "wrong", "however")
@@ -50,7 +50,6 @@ class AnswerabilityAssessment:
     evidence_count: int
 
     def to_public_dict(self) -> dict[str, object]:
-        """Bounded signals only; never raw evidence or private reasoning."""
         return {
             "answerable": self.answerable,
             "reason_code": self.reason_code,
@@ -307,10 +306,8 @@ def compose_verified_answer(claims: Sequence[GroundedClaim], pack: EvidencePack,
     supports = [support for claim in claims for support in claim.supports]
     cited_ids = tuple(dict.fromkeys(support.message_id for support in supports))
     source_refs = tuple(dict.fromkeys(support.source_ref for support in supports))
-    authors = {
-        item.author for item in pack.messages
-        if item.author and item.message_id in set(cited_ids)
-    }
+    cited_set = set(cited_ids)
+    authors = {item.author for item in pack.messages if item.author and item.message_id in cited_set}
     confidence, confidence_reason = _confidence(len(cited_ids), len(authors), bool(disagreements))
     return AnswerResult(
         direct_answer=direct,
@@ -388,7 +385,6 @@ def _validate_literal_invariants(claim_text: str, quotes: Sequence[str]) -> None
     support_neg = bool(_NEGATION_RE.search(support_norm))
     if claim_neg != support_neg:
         raise CitationValidationError("negation polarity differs from cited support")
-
     if _comparison_is_reversed(claim_norm, support_norm):
         raise CitationValidationError("comparison direction is reversed")
 
@@ -410,7 +406,11 @@ def _comparison_is_reversed(claim: str, support: str) -> bool:
 
 
 def _edge_token(text: str, *, last: bool) -> str:
-    tokens = [token.casefold() for token in _TOKEN_RE.findall(text) if token.casefold() not in _FRAMING]
+    tokens: list[str] = []
+    for token in _TOKEN_RE.findall(text):
+        lowered = token.casefold()
+        if len(lowered) == 1 or lowered not in _FRAMING:
+            tokens.append(lowered)
     if not tokens:
         return ""
     return tokens[-1] if last else tokens[0]
