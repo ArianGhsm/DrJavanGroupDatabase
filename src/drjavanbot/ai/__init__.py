@@ -5,6 +5,7 @@ from .models import AnswerResult, EvidencePack, ProviderResult, UsageMetrics
 from .orchestrator import AIConfigurationError, ArchiveAnswerService
 from .planner import PLANNER_VERSION, SearchFamily, SearchPlan
 from .planner_cache import SearchPlanCache
+from .query_model import QUERY_MODEL_VERSION, RetrievalPolicy
 from .provider import (
     AuthenticationError,
     AvalAIClient,
@@ -20,6 +21,7 @@ __all__ = [
     "AIConfig", "EvidenceBudget", "classify_question", "AnswerResult", "EvidencePack",
     "ProviderResult", "UsageMetrics", "ArchiveAnswerService", "AIConfigurationError",
     "SearchPlan", "SearchFamily", "SearchPlanCache", "PLANNER_VERSION",
+    "QUERY_MODEL_VERSION", "RetrievalPolicy",
     "AvalAIClient", "ProviderError", "AuthenticationError", "RateLimitError",
     "ProviderTimeoutError", "ProviderUnavailableError", "ProviderResponseError",
     "ResponseCache", "TelemetryStore", "AvalAIKeyManager",

@@ -4,34 +4,9 @@ import json
 from typing import Sequence
 from .models import EvidencePack
 from .planner import SearchPlan
+from .planning_prompts import SEARCH_PLANNER_SYSTEM_PROMPT, search_planner_user_prompt
 
 PROMPT_VERSION = "archive-claim-grounding-v7-agentic-facet-recheck"
-
-SEARCH_PLANNER_SYSTEM_PROMPT = """You are the high-recall search-planning component for a large Persian/English dentistry Telegram archive.
-Return JSON only. Do NOT answer the question and do NOT provide clinical facts.
-
-Your only goal is to make later LOCAL archive retrieval find discussions even when the archive uses different wording from the user. You MAY and SHOULD use general language and dentistry terminology knowledge to generate search hints, synonyms, developmental/treatment-stage terms, Persian/English equivalents, abbreviations and likely colloquial forms. These hints are NEVER evidence and can never become answer facts unless a real archive message is later retrieved.
-
-Decompose every meaningful question into independent retrieval aspects. Typical aspects include:
-- the core clinical topic/procedure/material;
-- the population or condition if specified;
-- the exact answer facet the user asks for: age/timing, indication, cause, technique, comparison, recommendation, complication, dose/quantity, prognosis, etc.;
-- domain terminology that a dentist might use instead of the user's wording;
-- concise intersections that combine the topic with the asked facet.
-
-IMPORTANT for age/timing questions: do not search only the procedure name. Create separate timing/population families plus clinically plausible terminology/stage wording that could identify the same discussion. The model may use domain terminology as SEARCH HINTS, but must not state what the correct age/timing is.
-IMPORTANT for multi-message Telegram discussions: keep some families deliberately single-concept (topic vs population vs timing/facet). The retrieval layer can bridge nearby hits from different families into one conversation window.
-IMPORTANT for broad topics: avoid one giant AND query. Use several short independent queries so a reply that says only an age, number, stage or short answer can still be recovered through neighboring messages.
-
-Do not invent specific brand/product names that the user did not mention; unknown brands should be discovered from archive context during refinement. General clinical terminology is allowed as a search hint.
-If the input has no meaningful archive/dental information, set searchable=false.
-Keep the initial plan bounded: at most 6 families, at most 4 short queries per family.
-
-Set required_aspects to the answer dimensions that must be covered before retrieval should be considered adequate, e.g. ["topic","timing_age","pediatric_population"].
-
-JSON shape:
-{"searchable":true,"intent":"timing_or_recommendation","core_concepts":["..."],"aliases":["..."],"optional_concepts":["..."],"entity_types":["procedure"],"required_aspects":["topic","timing_age"],"query_families":[{"name":"topic","queries":["..."]},{"name":"timing","queries":["..."]},{"name":"population","queries":["..."]},{"name":"domain_terms","queries":["..."]}],"phrases":[],"exclude_terms":[],"low_information_terms":[],"reply_context":true}
-Search hints are never evidence and must never leak into the final factual answer unless an archive message actually supports them."""
 
 REFINEMENT_SYSTEM_PROMPT = """You are the second-pass retrieval critic for a local dentistry Telegram archive.
 Return JSON only. Do NOT answer the user and do NOT add clinical facts.
@@ -94,10 +69,6 @@ SECOND-PASS ANSWERABILITY CHECK: your previous result was a syntactically valid 
 """
 
 
-def search_planner_user_prompt(question: str) -> str:
-    return json.dumps({"question": question}, ensure_ascii=False, separators=(",", ":"))
-
-
 def refinement_user_prompt(
     question: str,
     plan: SearchPlan,
@@ -129,6 +100,7 @@ def synthesis_user_prompt(pack: EvidencePack, *, plan: SearchPlan | None = None)
 
 
 QUERY_EXPANSION_SYSTEM_PROMPT = REFINEMENT_SYSTEM_PROMPT
+
 
 def query_expansion_user_prompt(question: str, observed_terms: tuple[str, ...]) -> str:
     return json.dumps({"question": question, "observed_local_terms": list(observed_terms[:20])}, ensure_ascii=False, separators=(",", ":"))
