@@ -58,7 +58,6 @@ def infer_question_facets(question: str) -> tuple[str, ...]:
     for facet, markers in _FACET_MARKERS:
         if any(_marker_matches(padded, marker) for marker in markers):
             out.append(facet)
-    # Age is a specialization of timing; keep only the more useful facet.
     if "timing_age" in out and "timing" in out:
         out.remove("timing")
     return tuple(out)
@@ -69,24 +68,19 @@ def facet_query_terms(facet: str) -> tuple[str, ...]:
 
 
 def comparison_targets(question: str) -> tuple[str, ...]:
-    """Extract user-provided sides of an explicit comparison without inventing entities."""
+    """Extract user-provided comparison sides on token boundaries only."""
     normalized = normalize_text(question)
-    for separator in (" یا ", " vs ", " versus "):
-        if separator not in f" {normalized} ":
+    for separator in ("یا", "vs", "versus"):
+        parts = re.split(rf"\s+{re.escape(separator)}\s+", normalized, maxsplit=3)
+        if len(parts) < 2:
             continue
-        parts = [informative_query(part) for part in normalized.split(separator.strip())]
-        values = tuple(part for part in parts if part)
+        values = tuple(value for value in (informative_query(part) for part in parts) if value)
         if len(values) >= 2:
             return values[:4]
     return ()
 
 
-def derive_retrieval_policy(
-    question: str,
-    *,
-    facets: Iterable[str],
-    family_count: int,
-) -> RetrievalPolicy:
+def derive_retrieval_policy(question: str, *, facets: Iterable[str], family_count: int) -> RetrievalPolicy:
     facet_set = set(facets)
     informative = informative_tokens(question)
     faceted = bool(facet_set & _DEEP_FACETS)
