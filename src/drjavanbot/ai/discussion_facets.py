@@ -5,8 +5,7 @@ from drjavanbot.normalization import normalize_text, tokenize
 from .planner import SearchPlan
 from .discussion_types import _HitState
 
-# These are retrieval-language markers only. They identify which planned family
-# can satisfy an answer dimension; they do not encode a dental answer.
+# Retrieval-language markers only; no dental answer facts are encoded here.
 ASPECT_MARKERS: dict[str, tuple[str, ...]] = {
     "timing_age": ("timing", "age", "زمان", "سن", "سالگی", "when"),
     "timing": ("timing", "زمان", "زمان شروع", "when"),
@@ -26,22 +25,21 @@ ASPECT_MARKERS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _required_family_groups(plan: SearchPlan, anchor_families: set[str]) -> tuple[set[str], ...]:
-    """Map typed requested facets to planned families without faking coverage.
+def _aspect_key(value: object) -> str:
+    # Keep schema underscores. `normalize_text()` intentionally normalizes
+    # punctuation and would turn `timing_age` into a different lookup key.
+    return str(value).strip().casefold().replace("-", "_").replace(" ", "_")
 
-    Typed `answer_facets` are canonical. `required_aspects` remains a legacy
-    compatibility source. If a required facet has no matching family we retain a
-    private impossible sentinel group: the retrieval report then correctly says
-    that one required group is missing instead of silently shrinking the
-    denominator and declaring a discussion facet-complete.
-    """
+
+def _required_family_groups(plan: SearchPlan, anchor_families: set[str]) -> tuple[set[str], ...]:
+    """Map typed requested facets to families without silently shrinking gaps."""
     groups: list[set[str]] = []
     families = tuple(plan.query_families)
     raw_aspects = (*tuple(getattr(plan, "answer_facets", ()) or ()), *tuple(plan.required_aspects or ()))
     aspects: list[str] = []
     seen_aspects: set[str] = set()
     for raw in raw_aspects:
-        aspect = normalize_text(str(raw).replace("-", "_"))
+        aspect = _aspect_key(raw)
         if not aspect or aspect == "topic" or aspect in seen_aspects:
             continue
         seen_aspects.add(aspect)
@@ -70,8 +68,8 @@ def _required_family_groups(plan: SearchPlan, anchor_families: set[str]) -> tupl
             if marker_match or purpose_match:
                 matched.add(family.name)
 
-        # Anchor-only topic families must not satisfy a requested non-topic facet
-        # merely because a generic query happens to contain a marker.
+        # Prefer a non-anchor facet family when one exists. An intersection can
+        # still satisfy a facet only when there is no dedicated family.
         non_anchor = matched - anchor_families
         if non_anchor:
             matched = non_anchor
@@ -83,16 +81,23 @@ def _required_family_groups(plan: SearchPlan, anchor_families: set[str]) -> tupl
 
 
 def _anchor_family_names(plan: SearchPlan) -> set[str]:
-    """Families that directly carry the user's requested topic/entity.
+    """Resolve topic anchors from typed metadata, plus bounded rescue anchors.
 
-    The typed planner contract is canonical. Name/query heuristics remain only as
-    a compatibility fallback for old cached plans and legacy tests.
+    Typed planner anchors are canonical. Refined/corpus families are unioned
+    because a weak first pass can discover the actual archive vocabulary only in
+    the bounded second pass. Generic `rescue` families do not automatically
+    become anchors.
     """
     typed = {
         family.name
         for family in tuple(getattr(plan, "anchor_families", ()) or ())
         if getattr(family, "name", "")
     }
+    typed.update(
+        family.name
+        for family in plan.query_families
+        if _is_topic_refinement_family(family.name.casefold())
+    )
     if typed:
         return typed
 
