@@ -1,0 +1,37 @@
+name: Brain v2 legacy migration QA
+
+on:
+  push:
+    branches: [integration/brain-v2-legacy-qa]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-semantic-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.lock
+          python -m pip install --no-deps .
+      - name: Compile
+        run: python -m compileall -q src deploy
+      - name: Legacy semantic benchmark cross-check
+        run: |
+          drjavanbot --archive-dir "گروه دکتر جوان" semantic-benchmark --strict --top-k 12 > legacy-semantic-report.json
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-semantic-report
+          path: legacy-semantic-report.json
+          if-no-files-found: error
+          retention-days: 14
