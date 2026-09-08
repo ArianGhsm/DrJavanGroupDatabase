@@ -9,6 +9,7 @@ User=drjavanbot
 Group=drjavanbot
 WorkingDirectory=/opt/drjavanbot/current
 EnvironmentFile=/etc/drjavanbot/drjavanbot.env
+ExecStartPre=+/usr/bin/install -d -o drjavanbot -g drjavanbot -m 0700 /var/lib/drjavanbot/update
 ExecStart=/opt/drjavanbot/current/.venv/bin/drjavanbot-bot
 Restart=on-failure
 RestartSec=3
