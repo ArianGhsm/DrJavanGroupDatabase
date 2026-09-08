@@ -143,7 +143,7 @@ def _prepare_release(sha: str, python_exe: str) -> Path:
     if not reused:
         _pip_install(vpython, ["-r", "requirements.lock"], cwd=release)
         _pip_install(vpython, ["-r", "requirements-dev.lock"], cwd=release)
-    _run([vpython, "-m", "pip", "install", "--no-deps", "."], cwd=release)
+    _run([vpython, "-m", "pip", "install", "--no-deps", "--no-build-isolation", "."], cwd=release)
     return release
 
 

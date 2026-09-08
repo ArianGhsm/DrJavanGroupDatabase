@@ -317,7 +317,7 @@ def _prepare_release(
     )
     # Local project installation does not need the network and must never resolve
     # dependencies again after the locked dependency gate above.
-    _run([str(pip_python), "-m", "pip", "install", "--no-deps", "."], cwd=release, timeout=300)
+    _run([str(pip_python), "-m", "pip", "install", "--no-deps", "--no-build-isolation", "."], cwd=release, timeout=300)
     (release / ".deploy_commit").write_text(sha + "\n", encoding="utf-8")
     os.chmod(release / ".deploy_commit", 0o644)
     return release
