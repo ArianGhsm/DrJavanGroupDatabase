@@ -5,58 +5,112 @@ from drjavanbot.normalization import normalize_text, tokenize
 from .planner import SearchPlan
 from .discussion_types import _HitState
 
+# These are retrieval-language markers only. They identify which planned family
+# can satisfy an answer dimension; they do not encode a dental answer.
 ASPECT_MARKERS: dict[str, tuple[str, ...]] = {
     "timing_age": ("timing", "age", "زمان", "سن", "سالگی", "when"),
+    "timing": ("timing", "زمان", "زمان شروع", "when"),
     "pediatric_population": ("population", "pediatric", "child", "children", "کودک", "بچه", "اطفال", "نوجوان"),
+    "population": ("population", "جمعیت", "گروه", "patient", "بیمار"),
+    "condition": ("condition", "شرایط", "وضعیت"),
     "comparison": ("comparison", "compare", "versus", "vs", "مقایسه"),
     "recommendation": ("recommendation", "recommend", "quality", "experience", "پیشنهاد", "توصیه", "تجربه"),
     "cause_reason": ("cause", "reason", "why", "علت", "دلیل"),
     "method_how": ("method", "how", "technique", "steps", "روش", "مراحل"),
-    "quantity": ("quantity", "amount", "dose", "دوز", "مقدار"),
+    "quantity": ("quantity", "amount", "مقدار", "تعداد"),
+    "dosage": ("dosage", "dose", "دوز", "دوزاژ"),
+    "indication": ("indication", "اندیکاسیون", "موارد استفاده"),
+    "complication": ("complication", "عارضه", "عوارض"),
+    "prognosis": ("prognosis", "پیش آگهی", "پروگنوز", "outcome"),
+    "stage": ("stage", "phase", "مرحله", "فاز"),
 }
 
 
 def _required_family_groups(plan: SearchPlan, anchor_families: set[str]) -> tuple[set[str], ...]:
+    """Map typed requested facets to planned families without faking coverage.
+
+    Typed `answer_facets` are canonical. `required_aspects` remains a legacy
+    compatibility source. If a required facet has no matching family we retain a
+    private impossible sentinel group: the retrieval report then correctly says
+    that one required group is missing instead of silently shrinking the
+    denominator and declaring a discussion facet-complete.
+    """
     groups: list[set[str]] = []
     families = tuple(plan.query_families)
-    for aspect in plan.required_aspects:
-        normalized_aspect = normalize_text(aspect)
-        if normalized_aspect in {"", "topic"}:
+    raw_aspects = (*tuple(getattr(plan, "answer_facets", ()) or ()), *tuple(plan.required_aspects or ()))
+    aspects: list[str] = []
+    seen_aspects: set[str] = set()
+    for raw in raw_aspects:
+        aspect = normalize_text(str(raw).replace("-", "_"))
+        if not aspect or aspect == "topic" or aspect in seen_aspects:
             continue
+        seen_aspects.add(aspect)
+        aspects.append(aspect)
+
+    for aspect in aspects:
         markers = ASPECT_MARKERS.get(aspect, (aspect.replace("_", " "),))
         normalized_markers = tuple(normalize_text(marker) for marker in markers if normalize_text(marker))
         matched: set[str] = set()
         for family in families:
+            purpose = normalize_text(str(getattr(family, "purpose", "")).replace("_", " "))
             haystacks = (
                 normalize_text(family.name.replace("_", " ")),
+                purpose,
                 *(normalize_text(query) for query in family.queries),
             )
-            if any(
+            marker_match = any(
                 marker and marker in haystack
                 for marker in normalized_markers
                 for haystack in haystacks
-            ):
+            )
+            purpose_match = (
+                (aspect in {"population", "pediatric_population"} and purpose == "population")
+                or (aspect == "stage" and purpose == "stage")
+            )
+            if marker_match or purpose_match:
                 matched.add(family.name)
-        if matched and matched not in groups:
-            groups.append(matched)
+
+        # Anchor-only topic families must not satisfy a requested non-topic facet
+        # merely because a generic query happens to contain a marker.
+        non_anchor = matched - anchor_families
+        if non_anchor:
+            matched = non_anchor
+
+        group = matched or {f"__missing_required_facet__:{aspect}"}
+        if group not in groups:
+            groups.append(group)
     return tuple(groups)
 
 
 def _anchor_family_names(plan: SearchPlan) -> set[str]:
-    """Families that directly carry the user's core requested entity/topic.
+    """Families that directly carry the user's requested topic/entity.
 
-    A bounded second-pass corpus/refinement family may also seed a rescued anchor.
-    This is deliberately narrower than accepting arbitrary rescue/facet families:
-    answer-facet families such as age/quality remain non-anchors and therefore
-    cannot promote generic hits when the original topic is absent.
+    The typed planner contract is canonical. Name/query heuristics remain only as
+    a compatibility fallback for old cached plans and legacy tests.
     """
+    typed = {
+        family.name
+        for family in tuple(getattr(plan, "anchor_families", ()) or ())
+        if getattr(family, "name", "")
+    }
+    if typed:
+        return typed
+
+    core_values = tuple(getattr(plan, "topic_anchors", ()) or ()) or tuple(plan.core_concepts)
     core = tuple(
         normalize_text(value)
-        for value in (*plan.core_concepts, *plan.aliases)
+        for value in (*core_values, *plan.aliases)
         if normalize_text(value) and len(normalize_text(value)) >= 2
     )
     out: set[str] = set()
     for family in plan.query_families:
+        if bool(getattr(family, "anchor", False)):
+            out.add(family.name)
+            continue
+        purpose = normalize_text(str(getattr(family, "purpose", "")))
+        if purpose in {"topic", "entity", "intersection"}:
+            out.add(family.name)
+            continue
         name = family.name.casefold()
         if any(token in name for token in ("topic", "core", "procedure", "product", "material", "entity")):
             out.add(family.name)
@@ -77,9 +131,6 @@ def _anchor_family_names(plan: SearchPlan) -> set[str]:
 def _is_topic_refinement_family(name: str) -> bool:
     normalized = normalize_text(name.replace("_", " "))
     tokens = set(tokenize(normalized))
-    # These names are produced by bounded archive-vocabulary refinement paths.
-    # Deliberately exclude generic "rescue" because it may represent only an
-    # answer facet and must not become a topic anchor by itself.
     return bool(tokens & {"refined", "refinement", "corpus"})
 
 
@@ -99,9 +150,10 @@ def _mark_topic_anchors(
     plan: SearchPlan,
     anchor_families: set[str],
 ) -> None:
+    topic_values = tuple(getattr(plan, "topic_anchors", ()) or ()) or tuple(plan.core_concepts)
     concepts = tuple(
         normalize_text(value)
-        for value in (*plan.core_concepts, *plan.aliases)
+        for value in (*topic_values, *plan.aliases)
         if normalize_text(value)
     )
     for state in states:
