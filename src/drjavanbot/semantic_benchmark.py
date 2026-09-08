@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from pathlib import Path
 import statistics
 import tempfile
@@ -47,14 +48,25 @@ class SemanticCaseReport:
     proxy_relevant_top_k: int
     top_k_relevance_proxy: float | None
     irrelevant_candidate_rate_proxy: float | None
+    first_relevant_discussion_rank: int | None
+    reciprocal_rank_proxy: float | None
     bounded_anchor_pool: int
     anchor_recall_proxy: float | None
+    bounded_anchor_discussion_pool: int
+    discussion_recall_proxy: float | None
     context_only_relevant_hits: int
     required_anchor_groups_hit: int
     required_anchor_groups_total: int
     max_colocated_required_groups: int
     colocated_required_groups_complete: bool
     independent_authors_top_k: int
+    independent_threads_top_k: int
+    discussion_count: int
+    facet_complete_discussions: int
+    topic_anchored_discussions: int
+    hydrated_discussions: int
+    duplicates_suppressed: int
+    retrieval_quality_state: str
     top_score: float | None
     gate_passed: bool
     gate_reason: str
@@ -68,6 +80,7 @@ class SemanticBenchmarkReport:
     archive_files: int
     top_k: int
     median_retrieval_ms: float | None
+    p95_retrieval_ms: float | None
     cases: tuple[SemanticCaseReport, ...]
     strict_failures: tuple[str, ...]
 
@@ -192,6 +205,21 @@ def default_semantic_cases() -> tuple[SemanticEvalCase, ...]:
             expectation="present",
         ),
         SemanticEvalCase(
+            name="generic_facet_pollution_guard",
+            question="سن topic-sentinel-zzqv-generic چقدره؟",
+            plan=_plan(
+                "timing_age",
+                ("topic-sentinel-zzqv-generic",),
+                (
+                    SearchFamily("topic", ("topic-sentinel-zzqv-generic",)),
+                    SearchFamily("timing", ("سن", "سالگی", "age")),
+                ),
+                required_aspects=("topic", "timing_age"),
+            ),
+            anchors=("topic-sentinel-zzqv-generic",),
+            expectation="absent",
+        ),
+        SemanticEvalCase(
             name="low_information_noise",
             question="چرا ریدی؟",
             plan=SearchPlan(
@@ -239,7 +267,9 @@ def semantic_benchmark_archive(
         backend = SQLiteSearchBackend(db_path)
         reports = tuple(_evaluate_case(backend, case, top_k=bounded_top_k) for case in selected_cases)
         failures = tuple(report.name for report in reports if not report.gate_passed)
-        median = statistics.median(report.latency_ms for report in reports) if reports else None
+        latencies = tuple(report.latency_ms for report in reports)
+        median = statistics.median(latencies) if latencies else None
+        p95 = _percentile_nearest_rank(latencies, 0.95)
         return SemanticBenchmarkReport(
             index_seconds=index_report.elapsed_seconds,
             db_size_bytes=index_report.db_size_bytes,
@@ -247,6 +277,7 @@ def semantic_benchmark_archive(
             archive_files=index_report.archive_files,
             top_k=bounded_top_k,
             median_retrieval_ms=median,
+            p95_retrieval_ms=p95,
             cases=reports,
             strict_failures=failures,
         )
@@ -266,9 +297,10 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
     )
     relevant = 0
     context_only = 0
+    first_relevant_rank: int | None = None
     combined_texts: list[str] = []
     max_colocated_groups = 0
-    for candidate in top:
+    for rank, candidate in enumerate(top, start=1):
         direct = normalize_text(candidate.message.text_normalized or candidate.message.text_raw)
         context = " ".join(normalize_text(item.text_normalized or item.text_raw) for item in candidate.context)
         bundle = " ".join((direct, context))
@@ -277,6 +309,8 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
         context_hit = any(anchor in context for anchor in anchors)
         if direct_hit or context_hit:
             relevant += 1
+            if first_relevant_rank is None:
+                first_relevant_rank = rank
         if not direct_hit and context_hit:
             context_only += 1
         if required_groups:
@@ -295,8 +329,10 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
 
     relevance_proxy = (relevant / len(top)) if top and anchors else None
     irrelevant_proxy = (1.0 - relevance_proxy) if relevance_proxy is not None else None
+    reciprocal_rank = (1.0 / first_relevant_rank) if first_relevant_rank is not None else None
 
     anchor_pool: set[str] = set()
+    anchor_discussion_pool: set[tuple[int, int]] = set()
     for anchor in case.anchors[:8]:
         for item in backend.search(SearchQuery(
             raw_query=anchor,
@@ -305,13 +341,23 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
             include_context=False,
         )):
             anchor_pool.add(item.message.source_locator)
+            anchor_discussion_pool.add(_discussion_proxy_key(item.message))
     selected_refs = {item.message.source_locator for item in top}
     recall_proxy = (len(selected_refs & anchor_pool) / len(anchor_pool)) if anchor_pool else None
+    selected_discussions = {_candidate_discussion_proxy_key(item) for item in top}
+    discussion_recall = (
+        len(selected_discussions & anchor_discussion_pool) / len(anchor_discussion_pool)
+        if anchor_discussion_pool else None
+    )
 
     authors = {
         item.message.author_normalized or item.message.author
         for item in top
         if item.message.author_normalized or item.message.author
+    }
+    threads = {
+        item.cluster_key or f"window:{item.message.source_page}:{item.message.source_order // 8}"
+        for item in top
     }
     gate_passed, gate_reason = _gate(
         case,
@@ -337,14 +383,25 @@ def _evaluate_case(backend: SQLiteSearchBackend, case: SemanticEvalCase, *, top_
         proxy_relevant_top_k=relevant,
         top_k_relevance_proxy=round(relevance_proxy, 4) if relevance_proxy is not None else None,
         irrelevant_candidate_rate_proxy=round(irrelevant_proxy, 4) if irrelevant_proxy is not None else None,
+        first_relevant_discussion_rank=first_relevant_rank,
+        reciprocal_rank_proxy=round(reciprocal_rank, 4) if reciprocal_rank is not None else None,
         bounded_anchor_pool=len(anchor_pool),
         anchor_recall_proxy=round(recall_proxy, 4) if recall_proxy is not None else None,
+        bounded_anchor_discussion_pool=len(anchor_discussion_pool),
+        discussion_recall_proxy=round(discussion_recall, 4) if discussion_recall is not None else None,
         context_only_relevant_hits=context_only,
         required_anchor_groups_hit=groups_hit,
         required_anchor_groups_total=len(required_groups),
         max_colocated_required_groups=max_colocated_groups,
         colocated_required_groups_complete=colocated_complete,
         independent_authors_top_k=len(authors),
+        independent_threads_top_k=len(threads),
+        discussion_count=retrieval.discussion_count,
+        facet_complete_discussions=retrieval.facet_complete_discussions,
+        topic_anchored_discussions=retrieval.topic_anchored_discussions,
+        hydrated_discussions=retrieval.hydrated_discussions,
+        duplicates_suppressed=retrieval.duplicates_suppressed,
+        retrieval_quality_state=retrieval.quality_state,
         top_score=round(top[0].local_score, 6) if top else None,
         gate_passed=gate_passed,
         gate_reason=gate_reason,
@@ -376,6 +433,22 @@ def _gate(
             )
         return True, "expected archive topic and colocated required facets retrieved"
     return True, "observational metric only"
+
+
+def _discussion_proxy_key(message) -> tuple[int, int]:
+    return (int(message.source_page), int(message.source_order) // 8)
+
+
+def _candidate_discussion_proxy_key(candidate) -> tuple[int, int]:
+    return _discussion_proxy_key(candidate.message)
+
+
+def _percentile_nearest_rank(values: Sequence[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    rank = max(1, math.ceil(max(0.0, min(1.0, percentile)) * len(ordered)))
+    return ordered[min(rank - 1, len(ordered) - 1)]
 
 
 def _plan(
