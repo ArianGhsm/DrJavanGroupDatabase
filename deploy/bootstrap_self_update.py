@@ -135,7 +135,8 @@ def _prepare_release(sha: str, python_exe: str) -> Path:
 
     venv = release / ".venv"
     reused = _reuse_active_venv(release)
-    if not reused and not (venv / "bin/python").exists():
+    has_setuptools = (venv / "bin/python").exists() and subprocess.run([str(venv / "bin/python"), "-c", "import setuptools"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if not reused and not has_setuptools:
         shutil.rmtree(venv, ignore_errors=True)
         _run([python_exe, "-m", "venv", "--system-site-packages", str(venv)])
 
