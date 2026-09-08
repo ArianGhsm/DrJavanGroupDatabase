@@ -195,6 +195,18 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
     ):
         return False, "strong_multi_author_discussion"
 
+    # Preserve the legacy bounded stopping rule for a dense one-family fallback:
+    # five or more nearby independent messages are enough to avoid an unnecessary
+    # model refinement even though v2 intentionally emits one discussion winner.
+    # A two-message cluster remains refinement-eligible.
+    if report.families_executed == 1 and any(
+        c.cluster_size >= 5
+        and "discussion_author_diversity" in c.match_reasons
+        and any(reason in {"exact_phrase", "normalized_tokens", "synonym"} for reason in c.match_reasons)
+        for c in candidates[:8]
+    ):
+        return False, "dense_single_family_discussion"
+
     if (
         len(candidates) >= 3
         and len(authors) >= 2
