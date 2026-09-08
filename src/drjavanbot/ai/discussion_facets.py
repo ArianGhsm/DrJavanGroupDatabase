@@ -15,6 +15,7 @@ ASPECT_MARKERS: dict[str, tuple[str, ...]] = {
     "quantity": ("quantity", "amount", "dose", "دوز", "مقدار"),
 }
 
+
 def _required_family_groups(plan: SearchPlan, anchor_families: set[str]) -> tuple[set[str], ...]:
     groups: list[set[str]] = []
     families = tuple(plan.query_families)
@@ -42,7 +43,13 @@ def _required_family_groups(plan: SearchPlan, anchor_families: set[str]) -> tupl
 
 
 def _anchor_family_names(plan: SearchPlan) -> set[str]:
-    """Families that directly carry the user's core requested entity/topic."""
+    """Families that directly carry the user's core requested entity/topic.
+
+    A bounded second-pass corpus/refinement family may also seed a rescued anchor.
+    This is deliberately narrower than accepting arbitrary rescue/facet families:
+    answer-facet families such as age/quality remain non-anchors and therefore
+    cannot promote generic hits when the original topic is absent.
+    """
     core = tuple(
         normalize_text(value)
         for value in (*plan.core_concepts, *plan.aliases)
@@ -54,6 +61,9 @@ def _anchor_family_names(plan: SearchPlan) -> set[str]:
         if any(token in name for token in ("topic", "core", "procedure", "product", "material", "entity")):
             out.add(family.name)
             continue
+        if _is_topic_refinement_family(name):
+            out.add(family.name)
+            continue
         for query in family.queries:
             normalized = normalize_text(query)
             if any(_query_equivalent_to_concept(term, normalized) for term in core):
@@ -62,6 +72,15 @@ def _anchor_family_names(plan: SearchPlan) -> set[str]:
     if not out and plan.query_families:
         out.add(plan.query_families[0].name)
     return out
+
+
+def _is_topic_refinement_family(name: str) -> bool:
+    normalized = normalize_text(name.replace("_", " "))
+    tokens = set(tokenize(normalized))
+    # These names are produced by bounded archive-vocabulary refinement paths.
+    # Deliberately exclude generic "rescue" because it may represent only an
+    # answer facet and must not become a topic anchor by itself.
+    return bool(tokens & {"refined", "refinement", "corpus"})
 
 
 def _query_equivalent_to_concept(concept: str, query: str) -> bool:
