@@ -59,6 +59,17 @@ def test_global_topic_plus_facet_in_different_discussions_does_not_pass():
     assert report.discussion_recall_at_k == 0.0
 
 
+def test_unrelated_nearby_candidates_do_not_form_a_fake_discussion_bridge():
+    backend = _Backend({
+        "ortho": (_candidate(1, 1, 11, "ortho"),),
+        "age": (_candidate(2, 1, 25, "age 8"),),
+    })
+    report = evaluate_case(backend, _case(), top_k=8)
+    assert not report.gate_passed
+    assert report.reason_code == "facet_not_colocated"
+    assert report.facet_colocation_complete is False
+
+
 def test_context_only_topic_and_direct_facet_in_same_bundle_is_recovered():
     facet = _candidate(1, 1, 10, "age 8", "A")
     parent = _record(9, 1, 9, "ortho", "B")
@@ -69,6 +80,29 @@ def test_context_only_topic_and_direct_facet_in_same_bundle_is_recovered():
     assert report.context_only_recovery_rate == 1.0
     assert report.author_diversity == 1
     assert report.relevant_discussion_hashes
+
+
+def test_absent_case_allows_irrelevant_fallback_candidates_but_not_supported_evidence():
+    case = GoldenCase(
+        case_id="absent", category="no_evidence_sentinel", question="unseen",
+        expectation="absent", query_families=(("topic", ("unseen",)),), topic_anchors=("unseen",),
+    )
+    report = evaluate_case(_Backend({"unseen": (_candidate(1, 1, 10, "totally unrelated"),)}), case, top_k=5)
+    assert report.gate_passed
+    assert report.reason_code == "absent_irrelevant_only"
+    assert report.supported_answer_observed is False
+    assert report.irrelevant_candidate_rate == 1.0
+
+
+def test_absent_case_fails_when_relevant_evidence_is_present():
+    case = GoldenCase(
+        case_id="absent", category="no_evidence_sentinel", question="unseen",
+        expectation="absent", query_families=(("topic", ("unseen",)),), topic_anchors=("unseen",),
+    )
+    report = evaluate_case(_Backend({"unseen": (_candidate(1, 1, 10, "unseen is here"),)}), case, top_k=5)
+    assert not report.gate_passed
+    assert report.reason_code == "unexpected_relevant_evidence"
+    assert report.supported_answer_observed is True
 
 
 def test_duplicate_query_family_is_measured_before_scheduler_dedup():
