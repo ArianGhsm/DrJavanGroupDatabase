@@ -12,7 +12,7 @@ import pytest
 
 from drjavanbot.telegram.app_v2 import TelegramBotApp
 from drjavanbot.telegram.config import TelegramConfig
-from drjavanbot.telegram.update_control import UpdateControl, UpdateStatus
+from drjavanbot.telegram.update_control import RemoteUpdateInfo, UpdateControl, UpdateStatus
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class FakeAPI:
     def __init__(self):
         self.sent=[]; self.edited=[]; self.callbacks=[]
-    def send_message(self, chat_id, text, **kw): self.sent.append((chat_id,text,kw)); return {}
+    def send_message(self, chat_id, text, **kw): self.sent.append((chat_id,text,kw)); return {"message_id": 8}
     def edit_message_text(self, chat_id, message_id, text, **kw): self.edited.append((chat_id,message_id,text,kw)); return {}
     def answer_callback(self, callback_id, **kw): self.callbacks.append(callback_id)
 
@@ -34,9 +34,16 @@ class FakeServices:
     def __init__(self): self.update_requests=0; self.rollback_requests=0
     def ai_configured(self): return True
     def model(self): return "deepseek-v4-flash"
-    def update_status(self): return UpdateStatus(state="idle")
-    def request_software_update(self): self.update_requests+=1; return "abc123"
+    def health(self): return {"index":{"healthy":True,"messages":1},"ai_configured":True,"provider_auth_failed":False,"updater":{"state":"idle"},"storage":{}}
+    def update_status(self): return UpdateStatus(state="idle", current_sha="a"*40)
+    def remote_update_info(self): return RemoteUpdateInfo(current_sha="a"*40,latest_sha="b"*40,update_available=True,ci_status="success")
+    def cached_remote_update_info(self): return self.remote_update_info()
+    def request_software_update(self, *, source="manual"):
+        self.update_requests+=1
+        return "abc123", self.remote_update_info()
     def request_rollback(self): self.rollback_requests+=1; return "def456"
+    def bind_update_progress_message(self,*args,**kwargs): return None
+    def previous_release_sha(self): return "9"*40
 
 
 def _app():
@@ -51,6 +58,8 @@ def _callback(user: int, data: str):
 
 
 def _load_deploy_script(filename: str):
+    if filename == "self_update.py":
+        filename = "update_engine_v2.py"
     path=ROOT/"deploy"/filename
     spec=importlib.util.spec_from_file_location(f"drjavan_{filename.replace('.', '_')}_test",path)
     module=importlib.util.module_from_spec(spec); assert spec and spec.loader; spec.loader.exec_module(module)
@@ -68,30 +77,30 @@ def test_update_control_only_accepts_fixed_actions_and_atomic_request(tmp_path):
         UpdateControl(tmp_path/"other"/"data").request("shell:rm -rf /")
 
 
-def test_update_control_reads_bounded_result(tmp_path):
+def test_update_control_reads_structured_result(tmp_path):
     control=UpdateControl(tmp_path/"data")
-    control.result_path.write_text(json.dumps({"state":"success","current_sha":"a"*40,"target_sha":"b"*40,"message":"ok"}),encoding="utf-8")
+    control.result_path.write_text(json.dumps({"state":"success","current_sha":"a"*40,"target_sha":"b"*40,"message":"ok","stage":"done","progress_current":7,"progress_total":7}),encoding="utf-8")
     status=control.status()
     assert status.state=="success" and status.target_sha=="b"*40
+    assert status.progress_current==7 and status.progress_total==7
 
 
-def test_owner_settings_expose_update_and_confirmation_requests_only_fixed_action():
+def test_owner_control_center_exposes_update_and_fixed_install_action():
     app=_app(); app._show_settings(42)
     keyboard=app.api.sent[-1][2]["reply_markup"]["inline_keyboard"]
-    assert any(button["callback_data"]=="software_update" for row in keyboard for button in row)
-    app._handle_callback(_callback(42,"software_update_confirm"))
-    confirmation=str(app.api.edited[-1][2])
+    assert any(button["callback_data"]=="adm:update" for row in keyboard for button in row)
+    app._handle_callback(_callback(42,"adm:update:install"))
     assert app.services.update_requests==1
-    assert "درخواست" in confirmation and "ثبت شد" in confirmation and "abc123" in confirmation
+    assert app.api.edited and "به‌روزرسانی" in str(app.api.edited[-1][2])
 
 
 def test_non_owner_cannot_trigger_update():
-    app=_app(); app._handle_callback(_callback(7,"software_update_confirm"))
+    app=_app(); app._handle_callback(_callback(7,"adm:update:install"))
     assert app.services.update_requests==0 and "فقط برای مالک" in app.api.sent[-1][1]
 
 
 def test_rollback_requires_owner_callback():
-    app=_app(); app._handle_callback(_callback(42,"software_rollback_confirm"))
+    app=_app(); app._handle_callback(_callback(42,"adm:update:rollback:yes"))
     assert app.services.rollback_requests==1
 
 
@@ -185,7 +194,7 @@ def test_updater_runtime_env_rejects_non_numeric_owner():
         })
 
 
-def test_updater_stage_gates_force_private_temp_and_pytest_basetemp(tmp_path, monkeypatch):
+def test_updater_stage_gates_use_private_temp_and_delegate_full_suite_to_ci(tmp_path, monkeypatch):
     module=_load_deploy_script("self_update.py")
     release=tmp_path/"release with space"; release.mkdir()
     stage=tmp_path/"stage"
@@ -196,12 +205,11 @@ def test_updater_stage_gates_force_private_temp_and_pytest_basetemp(tmp_path, mo
             db=stage/"data"/"archive.sqlite3"; db.parent.mkdir(parents=True,exist_ok=True); db.touch()
         return SimpleNamespace(returncode=0,stdout="",stderr="")
     monkeypatch.setattr(module,"_run",fake_run)
-    stage_db=module._run_stage_gates(release,stage,{"TELEGRAM_BOT_TOKEN":"","TELEGRAM_OWNER_ID":"42","DRJAVAN_DATA_DIR":"/data","DRJAVAN_CACHE_DIR":"/cache"})
+    stage_db=module._run_stage_gates(release,stage,{"TELEGRAM_BOT_TOKEN":"","TELEGRAM_OWNER_ID":"42","DRJAVAN_DATA_DIR":"/data","DRJAVAN_CACHE_DIR":"/cache"},change_class="index")
     assert stage_db==stage/"data"/"archive.sqlite3"
-    pytest_calls=[item for item in calls if "pytest" in item[0]]
-    assert len(pytest_calls)==1
-    cmd,kwargs=pytest_calls[0]
-    assert "--basetemp" in cmd and str(stage/"pytest") in cmd
+    assert not any("pytest" in cmd for cmd,_ in calls)
+    reindex_call=next((cmd,kwargs) for cmd,kwargs in calls if "reindex" in cmd)
+    _,kwargs=reindex_call
     env=kwargs["env"]
     assert env["TMPDIR"]==str(stage/"tmp") and env["TEMP"]==str(stage/"tmp") and env["TMP"]==str(stage/"tmp")
     assert env["DRJAVAN_ARCHIVE_DIR"]==str(release/"گروه دکتر جوان")
@@ -237,7 +245,7 @@ def test_bootstrap_preserves_existing_release_history(tmp_path, monkeypatch):
 
 
 def test_updater_has_no_post_deploy_git_reset_hard():
-    source=(ROOT/"deploy/self_update.py").read_text(encoding="utf-8")
+    source=(ROOT/"deploy/update_engine_v2.py").read_text(encoding="utf-8")
     assert '"reset", "--hard"' not in source
 
 

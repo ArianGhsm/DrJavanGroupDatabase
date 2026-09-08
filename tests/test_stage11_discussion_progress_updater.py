@@ -77,7 +77,6 @@ class DiscussionBackend:
 
     def get_context(self, message, *, before=2, after=3, follow_reply=True):
         self.context_calls.append((message.message_id, before, after, follow_reply))
-        # Return enough context to prove the expansion is carried forward.
         return tuple(
             _record(9000 + message.message_id * 10 + i, message.source_order + i, f"context {i}", f"C{i}")
             for i in range(1, min(after, 4) + 1)
@@ -220,7 +219,6 @@ def test_progressive_app_shows_real_stages_and_deletes_status_after_answer():
     assert "جست" in combined
     assert "گفت" in combined or "context" in combined
     assert "message_id" in combined
-    # Status is removed only after a final answer has also been sent.
     assert any("پاسخ مستند" in item[1] for item in api.sent[1:])
     assert (42,77) in api.deleted
     assert len(api.actions) >= 2
@@ -240,7 +238,7 @@ def test_progress_ui_never_presents_itself_as_model_chain_of_thought():
 
 
 def _load_updater():
-    path=ROOT/"deploy/self_update.py"
+    path=ROOT/"deploy/update_engine_v2.py"
     spec=importlib.util.spec_from_file_location("drjavan_stage11_updater",path)
     module=importlib.util.module_from_spec(spec); assert spec and spec.loader; spec.loader.exec_module(module)
     return module
@@ -270,14 +268,16 @@ def test_pip_install_uses_cache_long_read_timeout_and_bounded_retry(tmp_path, mo
     assert kwargs["timeout"]==module.PIP_PROCESS_TIMEOUT_SECONDS
     assert kwargs["env"]["PIP_CACHE_DIR"]==str(cache)
     assert kwargs["env"]["PIP_NO_INPUT"]=="1"
-    assert progress and "تلاش 2/2" in progress[-1][0][2]
+    assert progress and "تلاش 2/2" in progress[-1][0][5]
 
 
-def test_updater_dependency_install_is_pre_switch_and_does_not_duplicate_runtime_lock():
-    source=(ROOT/"deploy/self_update.py").read_text(encoding="utf-8")
-    assert source.index("release = _prepare_release") < source.index('["systemctl", "stop", SERVICE]')
-    # requirements-dev.lock recursively includes requirements.lock; updater should
-    # not perform two separate network install passes over the same dependency set.
-    prepare=source[source.index("def _prepare_release"):source.index("def _pip_install")]
+def test_updater_dependency_install_is_pre_switch_and_single_locked_pass():
+    source=(ROOT/"deploy/update_engine_v2.py").read_text(encoding="utf-8")
+    update=source[source.index("def _update"):source.index("def _rollback")]
+    assert update.index("release = _prepare_release") < update.index('["systemctl", "stop", SERVICE]')
+    prepare=source[source.index("def _prepare_release"):source.index("def _run_stage_gates")]
     assert 'requirements-dev.lock' in prepare
     assert '"-r", "requirements.lock"' not in prepare
+    # Full pytest/Quality Lab is exact-SHA CI responsibility, not repeated by VPS.
+    stage=source[source.index("def _run_stage_gates"):source.index("def _github_ci_status")]
+    assert "pytest" not in stage and "quality-eval" not in stage
