@@ -15,6 +15,7 @@ class TelegramConfig:
     key_entry_timeout_seconds: int = 300
     source_session_ttl_seconds: int = 3600
     update_check_interval_seconds: int = 300
+    update_progress_interval_seconds: int = 2
     rich_ui_enabled: bool = True
     progress_ui_enabled: bool = True
 
@@ -28,6 +29,7 @@ class TelegramConfig:
             key_entry_timeout_seconds=_int("DRJAVAN_TG_KEY_ENTRY_TIMEOUT_SECONDS", 300, 60, 1800),
             source_session_ttl_seconds=_int("DRJAVAN_TG_SOURCE_SESSION_TTL_SECONDS", 3600, 300, 86400),
             update_check_interval_seconds=_int("DRJAVAN_TG_UPDATE_CHECK_INTERVAL_SECONDS", 300, 60, 3600),
+            update_progress_interval_seconds=_int("DRJAVAN_TG_UPDATE_PROGRESS_INTERVAL_SECONDS", 2, 1, 10),
             rich_ui_enabled=_bool("DRJAVAN_TG_RICH_UI_ENABLED", True),
             progress_ui_enabled=_bool("DRJAVAN_TG_PROGRESS_UI_ENABLED", True),
         )
@@ -46,8 +48,6 @@ def _bool(name: str, default: bool) -> bool:
     if raw is None or not raw.strip():
         return default
     value = raw.strip().casefold()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off"}:
-        return False
+    if value in {"1", "true", "yes", "on"}: return True
+    if value in {"0", "false", "no", "off"}: return False
     raise ValueError(f"{name} must be a boolean")

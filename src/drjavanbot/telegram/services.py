@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 from datetime import datetime,timezone
+import shutil
 import sqlite3,threading
 from drjavanbot.ai.cache_resilient import ResilientResponseCache
 from drjavanbot.ai.config import AIConfig
@@ -17,7 +18,7 @@ from drjavanbot.storage import database_health,full_reindex
 from .config import ALLOWED_MODELS
 from .contracts import IndexNotReadyError
 from .state import BotStateStore
-from .update_control import UpdateControl
+from .update_control import UpdateControl, VALID_UPDATE_MODES
 
 class RuntimeServices:
     def __init__(self,*,archive_dir:Path,data_dir:Path,cache_dir:Path,secret_dir:Path,base_ai_config:AIConfig,state:BotStateStore):
@@ -61,15 +62,36 @@ class RuntimeServices:
         for ref in source_refs:
             if ref not in seen: out.append({"message_id":None,"author":None,"datetime":None,"source_file":ref.split("#",1)[0],"source_ref":ref})
         return out
-    def health(self): return {"bot":"up","index":database_health(self.db_path),"ai_configured":self.ai_configured(),"provider_auth_failed":self.state.provider_auth_failed(),"model":self.model()}
+    def health(self):
+        update=self.updates.status()
+        try:
+            disk=shutil.disk_usage(self.data_dir)
+            storage={"total_bytes":disk.total,"used_bytes":disk.used,"free_bytes":disk.free,"used_percent":round((disk.used/disk.total)*100,1) if disk.total else 0.0}
+        except OSError: storage={}
+        return {"bot":"up","index":database_health(self.db_path),"ai_configured":self.ai_configured(),"provider_auth_failed":self.state.provider_auth_failed(),"model":self.model(),"updater":{"state":update.state,"stage":update.stage,"target_sha":update.target_sha},"storage":storage}
     def stats(self):
         idx=SQLiteSearchBackend(self.db_path).stats() if self.db_path.exists() else {}; return {"bot":self.state.usage_summary(),"ai":self.telemetry.summary(),"cache":self.cache.stats(),"planner_cache":self.planner_cache.stats(),"index":idx,"model":self.model(),"access_mode":self.state.access_mode(),"rate_limit_per_minute":self.state.rate_limit_per_minute(),"last_reindex_at":self.state.last_reindex_at()}
     def clear_cache(self): return self.cache.clear()+self.planner_cache.clear()
-    def request_software_update(self): return self.updates.request("update")
-    def request_rollback(self): return self.updates.request("rollback")
+
+    # Admin Control Center / updater contract.
+    def update_mode(self): return self.state.update_mode()
+    def set_update_mode(self,mode):
+        if mode not in VALID_UPDATE_MODES: raise ValueError("invalid update mode")
+        self.state.set_update_mode(mode)
+    def request_software_update(self,*,source="manual"):
+        return self.updates.request_verified_update(source=source)
+    def request_rollback(self): return self.updates.request("rollback",source="manual")
     def update_status(self): return self.updates.status()
     def remote_update_info(self): return self.updates.remote_version()
-    def claim_update_notification(self,sha): return self.updates.claim_update_notification(sha)
+    def cached_remote_update_info(self): return self.updates.cached_remote_version()
+    def claim_update_notification(self,sha,kind="available"): return self.updates.claim_update_notification(sha,kind)
+    def bind_update_progress_message(self,request_id,chat_id,message_id,*,target_sha=None): return self.updates.bind_progress_message(request_id,chat_id,message_id,target_sha=target_sha)
+    def update_progress_binding(self): return self.updates.progress_binding()
+    def clear_update_progress_binding(self,request_id=None): return self.updates.clear_progress_binding(request_id)
+    def update_history(self,*,limit=10): return self.updates.history(limit=limit)
+    def current_release_sha(self): return self.updates.current_release_sha()
+    def previous_release_sha(self): return self.updates.previous_release_sha()
+
     def reindex(self):
         if not self._reindex_lock.acquire(blocking=False): return None
         handle=None; locked=False

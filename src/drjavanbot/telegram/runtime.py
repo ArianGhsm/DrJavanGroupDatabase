@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import signal
 import threading
+import time
 
 from drjavanbot.ai.config import AIConfig
 from drjavanbot.config import Settings
@@ -19,13 +20,12 @@ _PUBLIC_COMMANDS = [
     {"command": "help", "description": "راهنما"},
 ]
 _OWNER_COMMANDS = [
-    {"command": "start", "description": "شروع و پنل مالک"},
-    {"command": "panel", "description": "پنل مالک"},
-    {"command": "settings", "description": "تنظیمات مالک"},
-    {"command": "health", "description": "سلامت سرویس"},
-    {"command": "stats", "description": "آمار"},
+    {"command": "start", "description": "شروع و مرکز مدیریت"},
+    {"command": "panel", "description": "مرکز مدیریت"},
+    {"command": "health", "description": "سلامت سیستم"},
+    {"command": "stats", "description": "آمار ربات"},
     {"command": "reindex", "description": "بازسازی ایندکس"},
-    {"command": "update", "description": "آپدیت امن نرم‌افزار"},
+    {"command": "update", "description": "به‌روزرسانی نرم‌افزار"},
     {"command": "errors", "description": "خطاهای اخیر"},
     {"command": "help", "description": "راهنما"},
 ]
@@ -43,8 +43,7 @@ class PollingRunner:
     def _configure_command_menus(self) -> None:
         setter = getattr(self.api, "set_my_commands", None)
         if not callable(setter):
-            _LOG.warning("telegram_command_menu_unavailable")
-            return
+            _LOG.warning("telegram_command_menu_unavailable"); return
         try:
             setter(_PUBLIC_COMMANDS)
             setter(_OWNER_COMMANDS, scope={"type": "chat", "chat_id": self.app.owner_id})
@@ -54,28 +53,34 @@ class PollingRunner:
 
     def _check_updates_once(self) -> None:
         checker = getattr(self.app, "notify_update_if_available", None)
-        if not callable(checker):
-            return
-        try:
-            checker(force=False)
-        except Exception as exc:
-            _LOG.warning("github_update_check_failed error_class=%s", type(exc).__name__)
+        if not callable(checker): return
+        try: checker(force=False)
+        except Exception as exc: _LOG.warning("github_update_check_failed error_class=%s", type(exc).__name__)
+
+    def _sync_update_progress_once(self) -> None:
+        sync = getattr(self.app, "sync_update_progress", None)
+        if not callable(sync): return
+        try: sync()
+        except Exception as exc: _LOG.warning("update_progress_sync_failed error_class=%s", type(exc).__name__)
 
     def _update_monitor(self) -> None:
-        # Immediate startup check, then the configured interval (default 5 min).
+        # Remote GitHub checks stay low-frequency; local structured progress is
+        # refreshed every few seconds so long updates are no longer a black box.
         self._check_updates_once()
-        while not self.stop_event.wait(self.config.update_check_interval_seconds):
-            self._check_updates_once()
+        next_remote = time.monotonic() + self.config.update_check_interval_seconds
+        interval = float(self.config.update_progress_interval_seconds)
+        while not self.stop_event.wait(interval):
+            self._sync_update_progress_once()
+            now = time.monotonic()
+            if now >= next_remote:
+                self._check_updates_once()
+                next_remote = now + self.config.update_check_interval_seconds
 
     def run(self) -> None:
         offset: int | None = None
         me = self.api.get_me(); _LOG.info("telegram_bot_started bot_id=%s", me.get("id"))
         self._configure_command_menus()
-        self.update_monitor_thread = threading.Thread(
-            target=self._update_monitor,
-            name="drjavan-github-update-check",
-            daemon=True,
-        )
+        self.update_monitor_thread = threading.Thread(target=self._update_monitor,name="drjavan-update-monitor",daemon=True)
         self.update_monitor_thread.start()
         try:
             while not self.stop_event.is_set():
@@ -105,8 +110,7 @@ class PollingRunner:
                     if self.stop_event.wait(5.0): break
         finally:
             self.stop_event.set()
-            if self.update_monitor_thread is not None:
-                self.update_monitor_thread.join(timeout=2.0)
+            if self.update_monitor_thread is not None: self.update_monitor_thread.join(timeout=2.0)
             self.executor.shutdown(wait=True,cancel_futures=False); _LOG.info("telegram_bot_stopped")
 
 
