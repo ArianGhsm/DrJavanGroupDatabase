@@ -80,10 +80,11 @@ def deterministic_fallback_plan(question: str) -> SearchPlan:
     families = list(_select_initial_families(_dedupe_families(families), facets))
     policy = derive_retrieval_policy(question, facets=facets, family_count=len(families))
     required = _required_aspects(searchable, facets)
+    intent = _intent_from_facets(facets, searchable=searchable)
 
     return SearchPlan(
         searchable=searchable,
-        intent=_intent_from_facets(facets, searchable=searchable),
+        intent=intent,
         core_concepts=topic_anchors or tokens[:8],
         aliases=(),
         optional_concepts=(),
@@ -92,10 +93,10 @@ def deterministic_fallback_plan(question: str) -> SearchPlan:
         phrases=(),
         exclude_terms=(),
         low_information_terms=(),
-        reply_context=policy.expected_evidence_pattern != EvidencePattern.SINGLE_MESSAGE,
+        reply_context=str(policy.expected_evidence_pattern) != str(EvidencePattern.SINGLE_MESSAGE),
         required_aspects=required,
         schema_version=QUERY_MODEL_VERSION,
-        normalized_intent=_intent_from_facets(facets, searchable=searchable),
+        normalized_intent=intent,
         topic_anchors=topic_anchors,
         answer_facets=facets,
         population_constraints=("pediatric_population",) if "pediatric_population" in facets else (),
@@ -114,7 +115,7 @@ def infer_question_aspects(question: str) -> tuple[str, ...]:
 
 def plan_requires_deep_retrieval(plan: SearchPlan) -> bool:
     """True when superficial lexical strength must not short-circuit facet coverage."""
-    if str(plan.retrieval_policy.depth) == RetrievalDepth.DEEP:
+    if str(plan.retrieval_policy.depth) == str(RetrievalDepth.DEEP):
         return True
     demanding = {
         "timing_age", "comparison", "recommendation", "cause_reason", "method_how",
@@ -189,7 +190,8 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
     legacy_aspects = _string_tuple(payload.get("required_aspects"), max_items=12, max_len=60, question=question)
     inferred_facets = infer_question_facets(question)
     facets = _unique_text((*model_facets, *legacy_aspects, *inferred_facets))[:12]
-    required = _unique_text((*("topic",) if searchable else (), *facets))[:12]
+    required_seed = ("topic",) if searchable else ()
+    required = _unique_text((*required_seed, *facets))[:12]
 
     population = _string_tuple(
         constraints.get("population", payload.get("population_constraints")),
@@ -270,16 +272,16 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
 
     families.extend(_generic_aspect_families(question, existing=families, facets=facets))
 
-    if aliases and not any(str(family.purpose) == FamilyPurpose.ALIAS for family in families):
+    if aliases and not any(str(family.purpose) == str(FamilyPurpose.ALIAS) for family in families):
         families.append(SearchFamily("aliases", aliases[:4], purpose=FamilyPurpose.ALIAS, priority=72))
-    if terminology and not any(str(family.purpose) in {FamilyPurpose.TERMINOLOGY, FamilyPurpose.STAGE} for family in families):
+    if terminology and not any(str(family.purpose) in {str(FamilyPurpose.TERMINOLOGY), str(FamilyPurpose.STAGE)} for family in families):
         families.append(SearchFamily("terminology", terminology[:4], purpose=FamilyPurpose.TERMINOLOGY, priority=76))
     if typo_hints and not any("typo" in family.name.casefold() for family in families):
         families.append(SearchFamily("typo_variants", typo_hints[:4], purpose=FamilyPurpose.ALIAS, priority=65))
 
     generated_intersections = _deterministic_intersections(topic_anchors, facets, question=question)
     all_intersections = _unique_text((*intersection_queries, *generated_intersections))[:8]
-    if all_intersections and not any(str(family.purpose) == FamilyPurpose.INTERSECTION for family in families):
+    if all_intersections and not any(str(family.purpose) == str(FamilyPurpose.INTERSECTION) for family in families):
         families.append(SearchFamily(
             "intersection",
             all_intersections[:4],
@@ -302,9 +304,9 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
 
     policy = derive_retrieval_policy(question, facets=facets, family_count=len(families))
     expected_pattern = _bounded_pattern(payload.get("expected_evidence_pattern"), default=str(policy.expected_evidence_pattern))
-    # Deterministic policy owns cost/depth; model may only request an equally or
-    # more context-aware evidence pattern, never reduce a deep plan to direct.
-    if str(policy.depth) == RetrievalDepth.DEEP:
+    # Deterministic policy owns cost/depth; model may only influence context shape
+    # on non-deep plans. Deep plans cannot be downgraded by model output.
+    if str(policy.depth) == str(RetrievalDepth.DEEP):
         expected_pattern = str(policy.expected_evidence_pattern)
     policy = RetrievalPolicy(
         depth=policy.depth,
@@ -329,7 +331,7 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
         phrases=phrases,
         exclude_terms=excludes,
         low_information_terms=low,
-        reply_context=reply_context or expected_pattern != EvidencePattern.SINGLE_MESSAGE,
+        reply_context=reply_context or expected_pattern != str(EvidencePattern.SINGLE_MESSAGE),
         required_aspects=required,
         schema_version=QUERY_MODEL_VERSION,
         normalized_intent=normalized_intent,
@@ -405,15 +407,13 @@ def _select_initial_families(families: Iterable[SearchFamily], facets: Iterable[
     values = list(families)
     required = tuple(facets)
 
-    def safety_rank(item: tuple[int, SearchFamily]) -> tuple[int, int, int]:
+    def safety_rank(item: tuple[int, SearchFamily]) -> tuple[int, int, int, int]:
         index, family = item
         covers_required = any(_family_covers_facet(family, facet) for facet in required)
         anchor = family.anchor or _is_topic_family(family)
         return (-int(anchor), -int(covers_required), -int(family.priority), index)
 
     selected = [family for _, family in sorted(enumerate(values), key=safety_rank)[:MAX_INITIAL_FAMILIES]]
-    # Restore deterministic execution order by priority; SearchPlan.queries still
-    # performs round-robin breadth-first scheduling across this bounded set.
     selected.sort(key=lambda family: -int(family.priority))
     return tuple(selected)
 
@@ -438,7 +438,7 @@ def _parse_families(
         name = _bounded_text(item.get("name"), default=f"family-{index + 1}", max_len=40)
         purpose = _bounded_purpose(item.get("purpose"), name=name)
         priority = _bounded_int(item.get("priority"), default=_default_family_priority(purpose), minimum=0, maximum=100)
-        anchor = item.get("anchor", purpose in {FamilyPurpose.TOPIC, FamilyPurpose.ENTITY, FamilyPurpose.INTERSECTION})
+        anchor = item.get("anchor", str(purpose) in {str(FamilyPurpose.TOPIC), str(FamilyPurpose.ENTITY), str(FamilyPurpose.INTERSECTION)})
         if not isinstance(anchor, bool):
             anchor = False
         raw_queries = item.get("queries")
@@ -505,7 +505,6 @@ def _deterministic_topic_anchors(question: str, facets: Iterable[str]) -> tuple[
     for facet in facets:
         for value in facet_query_terms(facet):
             facet_tokens.update(informative_tokens(value))
-    # Generic population labels are constraints, not the core topic.
     if "pediatric_population" in set(facets):
         facet_tokens.update(informative_tokens("بچه بچه ها کودک کودکان اطفال نوجوان child children pediatric adolescent"))
     anchors = [token for token in tokens if token not in facet_tokens]
@@ -561,7 +560,7 @@ def _family_covers_facet(family: SearchFamily, facet: str) -> bool:
 
 
 def _is_topic_family(family: SearchFamily) -> bool:
-    return str(family.purpose) in {FamilyPurpose.TOPIC, FamilyPurpose.ENTITY} or family.name.casefold() in {"topic", "entity"}
+    return str(family.purpose) in {str(FamilyPurpose.TOPIC), str(FamilyPurpose.ENTITY)} or family.name.casefold() in {"topic", "entity"}
 
 
 def _bounded_purpose(value: Any, *, name: str) -> str:
@@ -570,22 +569,22 @@ def _bounded_purpose(value: Any, *, name: str) -> str:
         return value
     normalized = name.casefold()
     if "topic" in normalized:
-        return FamilyPurpose.TOPIC
+        return str(FamilyPurpose.TOPIC)
     if "entity" in normalized:
-        return FamilyPurpose.ENTITY
+        return str(FamilyPurpose.ENTITY)
     if "population" in normalized or "pedi" in normalized:
-        return FamilyPurpose.POPULATION
+        return str(FamilyPurpose.POPULATION)
     if "intersection" in normalized:
-        return FamilyPurpose.INTERSECTION
+        return str(FamilyPurpose.INTERSECTION)
     if "termin" in normalized or "domain" in normalized:
-        return FamilyPurpose.TERMINOLOGY
+        return str(FamilyPurpose.TERMINOLOGY)
     if "stage" in normalized:
-        return FamilyPurpose.STAGE
+        return str(FamilyPurpose.STAGE)
     if "alias" in normalized or "typo" in normalized:
-        return FamilyPurpose.ALIAS
+        return str(FamilyPurpose.ALIAS)
     if "facet" in normalized or "tim" in normalized or "age" in normalized:
-        return FamilyPurpose.FACET
-    return FamilyPurpose.OTHER
+        return str(FamilyPurpose.FACET)
+    return str(FamilyPurpose.OTHER)
 
 
 def _default_family_priority(purpose: str) -> int:
