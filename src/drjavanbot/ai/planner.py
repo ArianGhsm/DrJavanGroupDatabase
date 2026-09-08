@@ -189,7 +189,8 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
     )
     legacy_aspects = _string_tuple(payload.get("required_aspects"), max_items=12, max_len=60, question=question)
     inferred_facets = infer_question_facets(question)
-    facets = _unique_text((*model_facets, *legacy_aspects, *inferred_facets))[:12]
+    raw_facets = _unique_text((*model_facets, *legacy_aspects, *inferred_facets))[:12]
+    facets = tuple(facet for facet in raw_facets if facet != "topic")
     required_seed = ("topic",) if searchable else ()
     required = _unique_text((*required_seed, *facets))[:12]
 
@@ -365,8 +366,9 @@ def _generic_aspect_families(
         if not terms or any(_family_covers_facet(family, facet) for family in (*current, *out)):
             continue
         purpose = FamilyPurpose.POPULATION if facet.endswith("population") else FamilyPurpose.FACET
+        name = "facet_population" if facet == "pediatric_population" else f"facet_{facet}"
         out.append(SearchFamily(
-            f"facet_{facet}",
+            name,
             terms[:MAX_QUERIES_PER_FAMILY],
             purpose=purpose,
             priority=94 if purpose == FamilyPurpose.POPULATION else 92,
