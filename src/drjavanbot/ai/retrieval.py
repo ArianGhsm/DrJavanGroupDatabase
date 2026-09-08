@@ -12,7 +12,7 @@ from .discussion_cluster import _build_discussions
 from .discussion_hydrate import _hydrate_top_discussions
 from .discussion_select import _extract_evidence_candidates, _quality_state
 from .discussion_features import _family_coverage
-from .retrieval_contracts import RetrievalReport
+from .retrieval_contracts import RETRIEVAL_SEMANTICS_VERSION, RetrievalReport
 
 
 def retrieve_with_plan(
@@ -22,7 +22,12 @@ def retrieve_with_plan(
     candidate_limit: int = 160,
     evidence_limit: int = 56,
 ) -> RetrievalReport:
-    """Retrieve bounded topic-anchored discussions, then hydrate only their winners."""
+    """Retrieve bounded topic-anchored discussions, then hydrate only winners.
+
+    The typed planner owns query/family scheduling through `plan.queries`. This
+    engine owns ranking and discussion recovery. It consumes planner anchors,
+    facets and depth through compatibility helpers without inventing answer facts.
+    """
     prepared: list[tuple[str, SearchQuery]] = []
     seen_queries: set[str] = set()
     duplicate_queries_skipped = 0
@@ -90,9 +95,8 @@ def retrieve_with_plan(
         required_groups=required_groups,
     )
 
-    # A multi-family plan with no topic-anchor hit must not promote generic facet
-    # matches (for example bare age/year hits) into evidence. Bounded corpus/topic
-    # refinement families are classified as anchors before this point.
+    # Generic facet matches are not evidence when the plan explicitly has a
+    # topic anchor but no actual topic hit was recovered.
     has_topic_anchor = any(discussion.topic_anchored for discussion in discussions)
     has_non_anchor_families = bool(hit_families - anchor_families)
     if anchor_families and has_non_anchor_families and not has_topic_anchor:
@@ -107,7 +111,17 @@ def retrieve_with_plan(
         ),
     )[:MAX_DISCUSSIONS])
 
-    hydration_limit = min(12, max(6, max(1, evidence_limit) // 4))
+    # Planner depth changes how many winning discussions deserve context, never
+    # how much factual weight a model may assign. Hard ceilings stay local.
+    policy = getattr(plan, "retrieval_policy", None)
+    depth = str(getattr(policy, "depth", "standard"))
+    if depth == "direct":
+        depth_cap = 6
+    elif depth == "deep":
+        depth_cap = 12
+    else:
+        depth_cap = 8
+    hydration_limit = min(depth_cap, max(4, max(1, evidence_limit) // 4))
     hydrated, hydrated_count, discussion_windows = _hydrate_top_discussions(
         backend,
         ranked,
@@ -162,7 +176,7 @@ def retrieve_with_plan(
 
 
 def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
-    """Return whether a planner/refinement rescue is still useful."""
+    """Return whether one bounded planner/refinement rescue is still useful."""
     if not report.candidates:
         return True, "no_candidates"
     if report.quality_state == "facet_complete_discussion":
@@ -186,19 +200,12 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
     )
     max_family_coverage = max((_family_coverage(c.match_reasons) for c in candidates[:10]), default=0)
 
-    # Discussion clustering can intentionally collapse multiple nearby, independent
-    # authors into one representative. Do not mistake that for weak retrieval when
-    # at least two executed families support a genuinely multi-author discussion.
     if report.families_executed >= 2 and any(
         c.cluster_size >= 2 and "discussion_author_diversity" in c.match_reasons
         for c in candidates[:8]
     ):
         return False, "strong_multi_author_discussion"
 
-    # Preserve the legacy bounded stopping rule for a dense one-family fallback:
-    # five or more nearby independent messages are enough to avoid an unnecessary
-    # model refinement even though v2 intentionally emits one discussion winner.
-    # A two-message cluster remains refinement-eligible.
     if report.families_executed == 1 and any(
         c.cluster_size >= 5
         and "discussion_author_diversity" in c.match_reasons
@@ -217,4 +224,10 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
     return True, "coverage_or_diversity_weak"
 
 
-__all__ = ["DiscussionCandidate", "RetrievalReport", "assess_planned_retrieval", "retrieve_with_plan"]
+__all__ = [
+    "DiscussionCandidate",
+    "RETRIEVAL_SEMANTICS_VERSION",
+    "RetrievalReport",
+    "assess_planned_retrieval",
+    "retrieve_with_plan",
+]
