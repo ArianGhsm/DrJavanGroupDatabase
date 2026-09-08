@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import fcntl
 import os
@@ -42,6 +43,7 @@ def main() -> int:
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock = LOCK_FILE.open("a+")
     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    started_at = _now()
 
     account, python_exe, sha = _preflight()
     _rewrite_env_archive_path()
@@ -64,6 +66,7 @@ def main() -> int:
         _run(["systemctl", "enable", "--now", "drjavanbot-updater.path"])
         _run(["systemctl", "restart", "drjavanbot.service"])
         _wait_service_active()
+        _record_bootstrap_success(account, sha, previous_release, started_at=started_at)
     except Exception:
         if switched and previous_release is not None and previous_release.exists():
             _make_release_runtime_readable(previous_release)
@@ -295,6 +298,34 @@ def _prepare_update_state(account, sha: str, previous_release: Path | None) -> N
     _atomic_json(history_path, history[-10:], uid=account.pw_uid, gid=account.pw_gid)
 
 
+def _record_bootstrap_success(account, sha: str, previous_release: Path | None, *, started_at: str) -> None:
+    """Supersede stale legacy updater state after a verified bootstrap switch."""
+    previous_sha = _release_marker(previous_release)
+    for path in (UPDATE_DIR / "request.json", UPDATE_DIR / "progress-ui.json"):
+        path.unlink(missing_ok=True)
+    _atomic_json(
+        UPDATE_DIR / "result.json",
+        {
+            "schema": 2,
+            "state": "up_to_date" if previous_sha == sha else "success",
+            "request_id": f"bootstrap-{sha[:12]}",
+            "action": "update",
+            "current_sha": previous_sha,
+            "target_sha": sha,
+            "message": "نسخه جدید با موفقیت فعال شد.",
+            "stage": "done",
+            "stage_label": "پایان",
+            "progress_current": 7,
+            "progress_total": 7,
+            "started_at": started_at,
+            "updated_at": _now(),
+            "change_class": "bootstrap",
+        },
+        uid=account.pw_uid,
+        gid=account.pw_gid,
+    )
+
+
 def _read_history(path: Path) -> list[str]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -411,6 +442,10 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _text(cmd: list[str]) -> str:
