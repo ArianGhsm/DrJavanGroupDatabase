@@ -64,11 +64,15 @@ class RuntimeServices:
         return out
     def health(self):
         update=self.updates.status()
+        index_health=dict(database_health(self.db_path))
+        # Admin UI consumes a single explicit boolean instead of inferring health
+        # from message counts. Keep the storage-level `healthy` field unchanged.
+        index_health["ok"]=bool(index_health.get("healthy",False))
         try:
             disk=shutil.disk_usage(self.data_dir)
             storage={"total_bytes":disk.total,"used_bytes":disk.used,"free_bytes":disk.free,"used_percent":round((disk.used/disk.total)*100,1) if disk.total else 0.0}
         except OSError: storage={}
-        return {"bot":"up","index":database_health(self.db_path),"ai_configured":self.ai_configured(),"provider_auth_failed":self.state.provider_auth_failed(),"model":self.model(),"updater":{"state":update.state,"stage":update.stage,"target_sha":update.target_sha},"storage":storage}
+        return {"bot":"up","index":index_health,"ai_configured":self.ai_configured(),"provider_auth_failed":self.state.provider_auth_failed(),"model":self.model(),"updater":{"state":update.state,"stage":update.stage,"target_sha":update.target_sha},"storage":storage}
     def stats(self):
         idx=SQLiteSearchBackend(self.db_path).stats() if self.db_path.exists() else {}; return {"bot":self.state.usage_summary(),"ai":self.telemetry.summary(),"cache":self.cache.stats(),"planner_cache":self.planner_cache.stats(),"index":idx,"model":self.model(),"access_mode":self.state.access_mode(),"rate_limit_per_minute":self.state.rate_limit_per_minute(),"last_reindex_at":self.state.last_reindex_at()}
     def clear_cache(self): return self.cache.clear()+self.planner_cache.clear()
