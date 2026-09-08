@@ -7,7 +7,7 @@ import statistics
 import tempfile
 import time
 
-from drjavanbot.ai.planner import SearchFamily, SearchPlan
+from drjavanbot.ai.planner import SearchPlan
 from drjavanbot.ai.retrieval import retrieve_with_plan
 from drjavanbot.normalization import normalize_text, tokenize
 from drjavanbot.search import SQLiteSearchBackend
@@ -15,6 +15,7 @@ from drjavanbot.storage import full_reindex
 from .gates import quality_gate_failures
 from .golden import golden_cases
 from .grounding import run_grounding_red_team
+from .planning import quality_search_plan
 from .schema import AggregateMetrics, CaseMetrics, GoldenCase, QualityReport, REPORT_SCHEMA_VERSION
 from .scripted import run_scripted_e2e
 
@@ -35,26 +36,8 @@ class _Bundle:
 
 
 def _plan(case: GoldenCase) -> SearchPlan:
-    if not case.query_families:
-        return SearchPlan(
-            searchable=False,
-            intent=case.category,
-            core_concepts=(), aliases=(), optional_concepts=(), entity_types=(),
-            query_families=(), phrases=(), exclude_terms=(), low_information_terms=(),
-            reply_context=False, required_aspects=(),
-        )
-    return SearchPlan(
-        searchable=True,
-        intent=case.category,
-        core_concepts=case.topic_anchors[:4] or (case.question,),
-        aliases=case.topic_anchors[4:8],
-        optional_concepts=tuple(group[0] for group in case.required_facets if group),
-        entity_types=(),
-        query_families=tuple(SearchFamily(name, queries) for name, queries in case.query_families),
-        phrases=(), exclude_terms=(), low_information_terms=(),
-        reply_context=case.reply_context,
-        required_aspects=tuple(f"facet_{i+1}" for i in range(len(case.required_facets))),
-    )
+    """Quality Lab compatibility adapter for the typed planner contract."""
+    return quality_search_plan(case)
 
 
 def _normalized_any(values: tuple[str, ...]) -> tuple[str, ...]:
