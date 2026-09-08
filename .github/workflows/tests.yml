@@ -2,7 +2,7 @@ name: DrJavanBot tests
 
 on:
   push:
-    branches: [main, parallel/brain-quality-lab-v2]
+    branches: [main, parallel/brain-quality-lab-v2, integration/brain-v2]
   pull_request:
 
 permissions:
@@ -50,7 +50,6 @@ jobs:
             --base-sha 4226f2c30a04d89a28afe8284be5c3e5f657a2a6 \
             --json-out quality-lab-report.json
       - name: Legacy semantic benchmark integration cross-check
-        if: github.event_name == 'pull_request' && github.head_ref == 'integration/brain-v2'
         run: |
           drjavanbot --archive-dir "گروه دکتر جوان" semantic-benchmark \
             --strict \
