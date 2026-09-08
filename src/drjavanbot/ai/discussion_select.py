@@ -6,6 +6,7 @@ from drjavanbot.search import EvidenceCandidate
 from .planner import SearchPlan
 from .discussion_types import DiscussionCandidate, MAX_DISCUSSIONS
 
+
 def _extract_evidence_candidates(
     discussions: Sequence[DiscussionCandidate],
     *,
@@ -64,7 +65,12 @@ def _quality_state(
     if (
         len(plan.query_families) <= 1
         and top[0].topic_anchored
+        and top[0].representative.cluster_size == 1
         and "discussion_exact_anchor" in top[0].ranking_reasons
     ):
+        # A true one-message exact lookup (e.g. a direct product/material name)
+        # can stop early. If several messages were clustered under a fallback
+        # single-family plan, keep the existing bounded refinement opportunity;
+        # clustering alone must not manufacture direct-answer confidence.
         return "strong_direct_answer_candidate"
     return "topical_coverage"
