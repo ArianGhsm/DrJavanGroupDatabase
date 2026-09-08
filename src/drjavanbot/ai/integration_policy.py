@@ -5,7 +5,7 @@ from typing import Sequence
 
 from .reasoning import AnswerabilityAssessment, assess_answerability
 
-INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v5"
+INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v6"
 
 _COMPLETE_STATES = {"facet_complete_discussion", "strong_direct_answer_candidate"}
 _RESCUE_STATES = {"only_topical_facet_missing", "generic_noisy_coverage", "no_candidates"}
@@ -13,13 +13,21 @@ _RESCUE_STATES = {"only_topical_facet_missing", "generic_noisy_coverage", "no_ca
 
 def _candidate_author_count(report) -> int:
     authors: set[str] = set()
+    clustered_multi_author = False
     for candidate in tuple(getattr(report, "candidates", ()) or ())[:16]:
+        if "discussion_author_diversity" in set(getattr(candidate, "match_reasons", ()) or ()):
+            clustered_multi_author = True
         values = (candidate.message, *tuple(getattr(candidate, "context", ()) or ())[:20])
         for message in values:
             author = getattr(message, "author_normalized", None) or getattr(message, "author", None)
             if author:
                 authors.add(str(author))
-    return len(authors)
+    # Retrieval can intentionally avoid hydration on direct plans; in that case
+    # the representative still carries the safe ranking fact that its discussion
+    # contained >1 independent author even though those identities are not copied
+    # into candidate.context. Preserve that diversity signal without inventing a
+    # larger count than retrieval actually established.
+    return max(len(authors), 2 if clustered_multi_author else 0)
 
 
 def _effective_hit_count(report) -> int:
@@ -57,9 +65,8 @@ def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, lega
 
     if depth == "direct":
         # Discussion retrieval may collapse several exact hits into one
-        # representative and carry the remaining authors in context. Count that
-        # admitted discussion evidence instead of treating one representative as
-        # one hit/voice and buying an unnecessary AI refinement.
+        # representative. Use cluster_size plus the safe author-diversity ranking
+        # signal instead of treating that representative as a single weak hit.
         if _effective_hit_count(report) >= 2 and author_count >= 2:
             return False, "direct_policy_diverse_coverage"
         return bool(legacy_needs_refinement), str(legacy_reason)
