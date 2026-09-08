@@ -1,5 +1,5 @@
 [Unit]
-Description=DrJavanBot secure atomic updater
+Description=DrJavanBot secure atomic updater v2
 After=network-online.target
 Wants=network-online.target
 
@@ -14,6 +14,8 @@ ExecStartPost=-/bin/chown drjavanbot:drjavanbot /var/lib/drjavanbot/update/resul
 ExecStartPost=-/bin/chmod 0600 /var/lib/drjavanbot/update/result.json
 ExecStartPost=-/bin/chown drjavanbot:drjavanbot /var/lib/drjavanbot/update/history.json
 ExecStartPost=-/bin/chmod 0600 /var/lib/drjavanbot/update/history.json
+ExecStartPost=-/bin/chown drjavanbot:drjavanbot /var/lib/drjavanbot/update/history-events.json
+ExecStartPost=-/bin/chmod 0600 /var/lib/drjavanbot/update/history-events.json
 TimeoutStartSec=1800
 UMask=0077
 RuntimeDirectory=drjavanbot-updater
