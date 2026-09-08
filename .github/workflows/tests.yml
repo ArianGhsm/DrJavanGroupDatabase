@@ -5,10 +5,8 @@ on:
     branches: [main, parallel/brain-quality-lab-v2]
   pull_request:
 
-# Temporary only for BASE_SHA measurement on the dedicated evaluation branch.
-# Final branch state restores read-only permissions after the safe baseline JSON exists.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -44,25 +42,21 @@ jobs:
           test "$DRJAVAN_ARCHIVE_DIR" = "گروه دکتر جوان"
       - name: Test
         run: pytest -q
-      - name: Full archive Quality Lab baseline
+      - name: Full archive Quality Lab strict gate
         run: |
           drjavanbot --archive-dir "گروه دکتر جوان" quality-eval \
+            --strict \
             --top-k 12 \
             --base-sha 4226f2c30a04d89a28afe8284be5c3e5f657a2a6 \
-            --json-out quality-lab-baseline.json
-      - name: Record BASE_SHA metrics on quality-lab branch
-        if: github.ref == 'refs/heads/parallel/brain-quality-lab-v2'
-        shell: bash
-        run: |
-          mkdir -p docs/quality-lab
-          cp quality-lab-baseline.json docs/quality-lab/BASELINE_4226f2c30a04d89a28afe8284be5c3e5f657a2a6.json
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/quality-lab/BASELINE_4226f2c30a04d89a28afe8284be5c3e5f657a2a6.json
-          if ! git diff --cached --quiet; then
-            git commit -m "Record Quality Lab BASE_SHA metrics [skip ci]"
-            git push origin HEAD:parallel/brain-quality-lab-v2
-          fi
+            --json-out quality-lab-report.json
+      - name: Upload PII-safe Quality Lab report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-lab-report
+          path: quality-lab-report.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify systemd unit syntax and fixed paths
         shell: bash
         run: |
