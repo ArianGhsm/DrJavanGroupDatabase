@@ -14,6 +14,7 @@ from .discussion_select import _extract_evidence_candidates, _quality_state
 from .discussion_features import _family_coverage
 from .retrieval_contracts import RetrievalReport
 
+
 def retrieve_with_plan(
     backend: SearchBackend,
     plan: SearchPlan,
@@ -90,7 +91,8 @@ def retrieve_with_plan(
     )
 
     # A multi-family plan with no topic-anchor hit must not promote generic facet
-    # matches (for example bare age/year hits) into evidence.
+    # matches (for example bare age/year hits) into evidence. Bounded corpus/topic
+    # refinement families are classified as anchors before this point.
     has_topic_anchor = any(discussion.topic_anchored for discussion in discussions)
     has_non_anchor_families = bool(hit_families - anchor_families)
     if anchor_families and has_non_anchor_families and not has_topic_anchor:
@@ -116,6 +118,11 @@ def retrieve_with_plan(
     candidates = _extract_evidence_candidates(hydrated, limit=evidence_limit)
 
     facet_complete = sum(1 for item in hydrated if item.facet_complete)
+    hydrated_discussion_count = sum(
+        1
+        for item in hydrated
+        if "adaptive_context_hydration" in item.representative.match_reasons
+    )
     reason_counts = Counter(
         reason
         for item in hydrated[:24]
@@ -140,7 +147,7 @@ def retrieve_with_plan(
         discussion_count=len(hydrated),
         facet_complete_discussions=facet_complete,
         topic_anchored_bridges=bridge_count,
-        hydrated_discussions=hydrated_count,
+        hydrated_discussions=hydrated_discussion_count,
         duplicates_suppressed=duplicates_suppressed,
         ranking_reason_counts=tuple(sorted(reason_counts.items()))[:24],
         quality_state=quality_state,
@@ -178,6 +185,16 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
         if any(reason in {"exact_phrase", "normalized_tokens", "synonym"} for reason in c.match_reasons)
     )
     max_family_coverage = max((_family_coverage(c.match_reasons) for c in candidates[:10]), default=0)
+
+    # Discussion clustering can intentionally collapse multiple nearby, independent
+    # authors into one representative. Do not mistake that for weak retrieval when
+    # at least two executed families support a genuinely multi-author discussion.
+    if report.families_executed >= 2 and any(
+        c.cluster_size >= 2 and "discussion_author_diversity" in c.match_reasons
+        for c in candidates[:8]
+    ):
+        return False, "strong_multi_author_discussion"
+
     if (
         len(candidates) >= 3
         and len(authors) >= 2
