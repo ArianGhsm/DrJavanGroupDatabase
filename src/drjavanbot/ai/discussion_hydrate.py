@@ -33,11 +33,11 @@ def _hydrate_top_discussions(
 ) -> tuple[tuple[DiscussionCandidate, ...], int, int]:
     """Hydrate only top discussions and report bounded message-anchor coverage.
 
-    ``context_hydrated`` historically represented hydrated candidate anchors.
-    Discussion retrieval may collapse several nearby candidate anchors into one
-    cluster, so the compatibility count now reports how many member anchors were
-    covered by a successful bounded discussion hydration. Actual hydrated
-    discussion count is derived separately from ``adaptive_context_hydration``.
+    ``context_hydrated`` and ``discussion_windows`` existed before discussion
+    clustering and represented candidate-anchor coverage. A v2 cluster may merge
+    several nearby anchors into one discussion, so both compatibility counters
+    continue to report covered member anchors. Actual hydrated discussion count is
+    reported separately by ``RetrievalReport.hydrated_discussions``.
     """
     values = tuple(discussions)
     if not values or not reply_context:
@@ -76,7 +76,7 @@ def _hydrate_top_discussions(
 
     output: list[DiscussionCandidate] = []
     hydrated_anchor_coverage = 0
-    discussion_windows = 0
+    expanded_anchor_coverage = 0
     for index, discussion in enumerate(values):
         if index >= bounded_limit:
             packed = _merge_discussion_context(discussion, ())
@@ -89,10 +89,11 @@ def _hydrate_top_discussions(
         backend_context = fetched[index]
         packed = _merge_discussion_context(discussion, backend_context)
         expanded = windows[index][2]
+        member_coverage = max(1, len(discussion.members))
         if backend_context:
-            hydrated_anchor_coverage += max(1, len(discussion.members))
+            hydrated_anchor_coverage += member_coverage
         if expanded and packed:
-            discussion_windows += 1
+            expanded_anchor_coverage += member_coverage
         if packed:
             output.append(_with_discussion_context(
                 discussion,
@@ -102,7 +103,7 @@ def _hydrate_top_discussions(
             ))
         else:
             output.append(discussion)
-    return tuple(output), hydrated_anchor_coverage, discussion_windows
+    return tuple(output), hydrated_anchor_coverage, expanded_anchor_coverage
 
 
 def _with_discussion_context(
