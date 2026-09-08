@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from drjavanbot.normalization import normalize_text
 
-QUERY_MODEL_VERSION = "query-understanding-v1"
+QUERY_MODEL_VERSION = "query-understanding-v2"
 MAX_INITIAL_FAMILIES = 8
 MAX_FINAL_FAMILIES = 10
 MAX_QUERIES_PER_FAMILY = 4
@@ -175,7 +175,7 @@ class SearchPlan:
 
     @property
     def queries(self) -> tuple[tuple[str, str], ...]:
-        """Family-balanced schedule: every family gets a chance before variants."""
+        """Breadth first, then prioritize semantic rewrites within the bounded budget."""
         out: list[tuple[str, str]] = []
         seen: set[str] = set()
         policy = self.retrieval_policy.bounded()
@@ -187,17 +187,40 @@ class SearchPlan:
         )
         query_budget = min(policy.query_budget, MAX_TOTAL_QUERIES)
         per_family = min(policy.per_family_budget, MAX_QUERIES_PER_FAMILY)
-        for query_index in range(per_family):
+
+        def append_query(family: SearchFamily, query_index: int) -> bool:
+            if query_index >= len(family.queries):
+                return False
+            value = family.queries[query_index]
+            key = _near_duplicate_key(value)
+            if not key or key in seen:
+                return False
+            seen.add(key)
+            out.append((family.name, value))
+            return len(out) >= query_budget
+
+        # Preserve the existing breadth-first guarantee: every selected family gets
+        # one chance before any family consumes additional variants.
+        for family in families:
+            if append_query(family, 0):
+                return tuple(out)
+
+        # Semantic question rewrites are deliberately promoted after breadth. They
+        # address vocabulary mismatch between colloquial user wording and archive
+        # wording, so running their distinct variants has higher recall value than
+        # spending the same budget on a third spelling/facet variant.
+        rewrite_families = tuple(family for family in families if _is_semantic_rewrite_family(family))
+        for query_index in range(1, per_family):
+            for family in rewrite_families:
+                if append_query(family, query_index):
+                    return tuple(out)
+
+        # Spend the remaining budget breadth-first across all other families.
+        for query_index in range(1, per_family):
             for family in families:
-                if query_index >= len(family.queries):
+                if family in rewrite_families:
                     continue
-                value = family.queries[query_index]
-                key = _near_duplicate_key(value)
-                if not key or key in seen:
-                    continue
-                seen.add(key)
-                out.append((family.name, value))
-                if len(out) >= query_budget:
+                if append_query(family, query_index):
                     return tuple(out)
         return tuple(out)
 
@@ -287,6 +310,11 @@ class SearchPlan:
         # Late import avoids a query_model <-> planner import cycle.
         from .planner import plan_from_payload
         return plan_from_payload(value, question=question)
+
+
+def _is_semantic_rewrite_family(family: SearchFamily) -> bool:
+    name = family.name.casefold().replace("-", "_").replace(" ", "_")
+    return name in {"semantic_rewrite", "semantic_rewrites", "query_rewrite", "query_rewrites", "reformulation", "reformulations"}
 
 
 def _near_duplicate_key(value: str) -> str:
