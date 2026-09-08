@@ -22,6 +22,7 @@ def _discussion_hydration_window(discussion: DiscussionCandidate) -> tuple[int, 
         return 2, 3, False
     return 1, 2, False
 
+
 def _hydrate_top_discussions(
     backend: SearchBackend,
     discussions: Sequence[DiscussionCandidate],
@@ -30,6 +31,14 @@ def _hydrate_top_discussions(
     reply_depth: int,
     limit: int,
 ) -> tuple[tuple[DiscussionCandidate, ...], int, int]:
+    """Hydrate only top discussions and report bounded message-anchor coverage.
+
+    ``context_hydrated`` historically represented hydrated candidate anchors.
+    Discussion retrieval may collapse several nearby candidate anchors into one
+    cluster, so the compatibility count now reports how many member anchors were
+    covered by a successful bounded discussion hydration. Actual hydrated
+    discussion count is derived separately from ``adaptive_context_hydration``.
+    """
     values = tuple(discussions)
     if not values or not reply_context:
         return values, 0, 0
@@ -66,7 +75,7 @@ def _hydrate_top_discussions(
                 fetched.append(())
 
     output: list[DiscussionCandidate] = []
-    hydrated_count = 0
+    hydrated_anchor_coverage = 0
     discussion_windows = 0
     for index, discussion in enumerate(values):
         if index >= bounded_limit:
@@ -81,7 +90,7 @@ def _hydrate_top_discussions(
         packed = _merge_discussion_context(discussion, backend_context)
         expanded = windows[index][2]
         if backend_context:
-            hydrated_count += 1
+            hydrated_anchor_coverage += max(1, len(discussion.members))
         if expanded and packed:
             discussion_windows += 1
         if packed:
@@ -93,7 +102,7 @@ def _hydrate_top_discussions(
             ))
         else:
             output.append(discussion)
-    return tuple(output), hydrated_count, discussion_windows
+    return tuple(output), hydrated_anchor_coverage, discussion_windows
 
 
 def _with_discussion_context(
