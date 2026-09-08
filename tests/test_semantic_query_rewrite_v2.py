@@ -47,7 +47,6 @@ def test_colloquial_pediatric_age_question_runs_multiple_semantic_rewrites():
     rewrites = [
         "سن مناسب مراجعه کودک برای ارتودنسی",
         "چه سنی مراجعه برای ارتودنسی کودک دیر محسوب می شود",
-        "زمان شروع ارتودنسی در کودکان",
         "ارتودنسی کودک سن مراجعه",
     ]
     plan = parse_search_plan(json.dumps(_payload(rewrite_queries=rewrites), ensure_ascii=False), question=question)
@@ -87,6 +86,6 @@ def test_semantic_rewrite_cannot_invent_an_age_threshold():
 def test_planner_contract_requires_semantic_rewrite_for_nontrivial_questions():
     assert QUERY_MODEL_VERSION == "query-understanding-v2"
     assert "semantic_rewrite" in SEARCH_PLANNER_SYSTEM_PROMPT
-    assert "3-4 standalone semantically distinct search phrasings" in SEARCH_PLANNER_SYSTEM_PROMPT
+    assert "exactly 3 standalone semantically distinct search phrasings" in SEARCH_PLANNER_SYSTEM_PROMPT
     assert "not token permutations" in SEARCH_PLANNER_SYSTEM_PROMPT
     assert "MUST NOT introduce a clinical answer" in SEARCH_PLANNER_SYSTEM_PROMPT
