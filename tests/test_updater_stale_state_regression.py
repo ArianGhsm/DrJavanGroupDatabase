@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -46,3 +45,10 @@ def test_bootstrap_success_supersedes_legacy_failure_and_clears_stale_ui_state(t
     assert result["progress_current"] == result["progress_total"] == 7
     assert not (update_dir / "request.json").exists()
     assert not (update_dir / "progress-ui.json").exists()
+
+
+def test_bot_service_repairs_update_directory_before_start():
+    unit = (ROOT / "deploy" / "drjavanbot.service").read_text(encoding="utf-8")
+    repair = "ExecStartPre=+/usr/bin/install -d -o drjavanbot -g drjavanbot -m 0700 /var/lib/drjavanbot/update"
+    assert repair in unit
+    assert unit.index(repair) < unit.index("ExecStart=/opt/drjavanbot/current/.venv/bin/drjavanbot-bot")
