@@ -5,7 +5,7 @@ from typing import Sequence
 
 from .reasoning import AnswerabilityAssessment, assess_answerability
 
-INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v3"
+INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v4"
 
 _COMPLETE_STATES = {"facet_complete_discussion", "strong_direct_answer_candidate"}
 _RESCUE_STATES = {"only_topical_facet_missing", "generic_noisy_coverage", "no_candidates"}
@@ -38,7 +38,7 @@ def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, lega
 
     stop_when_complete = bool(getattr(policy, "stop_when_required_facets_covered", True))
     if quality in _COMPLETE_STATES and stop_when_complete:
-        # A recommendation/comparison planner explicitly asks for multi-source
+        # Recommendation/comparison plans explicitly ask for multi-source
         # evidence. One locally complete discussion with only two voices is still
         # worth one bounded retrieval rescue; a diverse result is not.
         if expected == "multi_source" and (author_count < 3 or discussion_count < 2):
@@ -46,10 +46,11 @@ def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, lega
         return False, quality
 
     if depth == "direct":
-        # Direct lookup should not buy an AI refinement once local retrieval is
-        # already adequately diverse. Sparse two-hit fallbacks retain one rescue
-        # opportunity, which is useful for malformed-planner recovery.
-        if len(candidates) >= 3 and author_count >= 2:
+        # Direct lookup must not become deep merely because the planner provider
+        # failed or legacy ranking is conservative. Two independent archive hits
+        # are already enough to attempt exact-support extraction; sparse/one-voice
+        # coverage still gets one bounded retrieval rescue.
+        if len(candidates) >= 2 and author_count >= 2:
             return False, "direct_policy_diverse_coverage"
         return bool(legacy_needs_refinement), str(legacy_reason)
 
