@@ -14,6 +14,12 @@ from .cache import ResponseCache
 from .config import AIConfig
 from .corpus import sqlite_corpus_hints
 from .evidence import build_evidence_pack
+from .integration_policy import (
+    INTEGRATION_POLICY_VERSION,
+    assess_integrated_answerability,
+    bounded_refinement_families,
+    should_refine_retrieval,
+)
 from .models import AnswerResult, ProviderResult
 from .planner import (
     PLANNER_VERSION,
@@ -22,7 +28,6 @@ from .planner import (
     observed_vocabulary,
     parse_refinement_families,
     parse_search_plan,
-    plan_requires_deep_retrieval,
 )
 from .planner_cache import SearchPlanCache
 from .prompts import (
@@ -36,7 +41,6 @@ from .provider import AvalAIClient, ProviderError
 from .reasoning import (
     VALIDATION_SEMANTICS_VERSION,
     ClaimExtraction,
-    assess_answerability,
     compose_verified_answer,
     parse_claim_extraction,
     parse_verifier_output,
@@ -53,13 +57,13 @@ from .reasoning_prompts import (
     claim_extraction_user_prompt,
     claim_verifier_user_prompt,
 )
-from .retrieval import assess_planned_retrieval, retrieve_with_plan
+from .retrieval import RETRIEVAL_SEMANTICS_VERSION, assess_planned_retrieval, retrieve_with_plan
 from .telemetry import TelemetryStore
 from .validation import CitationValidationError, ModelOutputError
 
 
-# The whole logical state machine shares one hard ceiling. Provider-internal HTTP
-# retries remain separately bounded by AIConfig and do not create semantic loops.
+# One hard application-level semantic-call ceiling. Provider-internal transport
+# retries remain separately bounded by AIConfig and are not semantic loops.
 MAX_LOGICAL_AI_CALLS = 4
 _MIN_PLANNER_OUTPUT_TOKENS = 480
 _MIN_REFINEMENT_OUTPUT_TOKENS = 360
@@ -73,11 +77,19 @@ class AIConfigurationError(RuntimeError):
 
 
 class AIProvider(Protocol):
-    def chat_json(self, *, api_key: str, request_type: str, system_prompt: str, user_prompt: str, max_output_tokens: int) -> ProviderResult: ...
+    def chat_json(
+        self,
+        *,
+        api_key: str,
+        request_type: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> ProviderResult: ...
 
 
 class ArchiveAnswerService:
-    """Bounded evidence-reasoning state machine over immutable archive evidence."""
+    """Typed planning -> discussion retrieval -> verified archive reasoning."""
 
     def __init__(
         self,
@@ -110,7 +122,12 @@ class ArchiveAnswerService:
         if self.cache is not None:
             cached = self.cache.get(cache_key)
             if cached is not None:
-                _emit_progress(progress, "cache_hit", evidence_used=int(cached.evidence_used_count), authors=int(cached.independent_authors_count))
+                _emit_progress(
+                    progress,
+                    "cache_hit",
+                    evidence_used=int(cached.evidence_used_count),
+                    authors=int(cached.independent_authors_count),
+                )
                 return cached.with_runtime(cache_hit=True, ai_calls=0)
 
         api_key = self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
@@ -142,6 +159,9 @@ class ArchiveAnswerService:
             except ProviderError:
                 return _provider_failure_answer(ai_calls=ai_calls, refinement_used=False)
             except (ModelOutputError, CitationValidationError):
+                # Deterministic fallback understands generic question facets but
+                # contains no clinical answer facts. A malformed model plan is not
+                # cached, so the next request can try planning again.
                 plan = deterministic_fallback_plan(question)
                 planner_cacheable = False
             assert isinstance(plan, SearchPlan)
@@ -157,16 +177,27 @@ class ArchiveAnswerService:
                 self.cache.set(cache_key, answer)
             return answer
 
-        # STATE: RETRIEVE / optional REFINE
-        _emit_progress(progress, "searching", query_count=len(plan.queries), family_count=len(plan.query_families))
+        # STATE: RETRIEVE. Planner owns search breadth/depth policy; retrieval owns
+        # whether that work actually found a coherent topic/facet discussion.
+        _emit_progress(
+            progress,
+            "searching",
+            query_count=len(plan.queries),
+            family_count=len(plan.query_families),
+            depth=str(getattr(plan.retrieval_policy, "depth", "standard")),
+        )
         report = retrieve_with_plan(self.backend, plan)
         _emit_retrieval_progress(progress, report, refined=False)
-        needs_refinement, retrieval_reason = assess_planned_retrieval(report)
-        facet_sensitive = plan_requires_deep_retrieval(plan)
-        if facet_sensitive:
-            needs_refinement = True
-            retrieval_reason = f"answer_facet_check:{retrieval_reason}"
+        legacy_needs, legacy_reason = assess_planned_retrieval(report)
+        needs_refinement, retrieval_reason = should_refine_retrieval(
+            plan,
+            report,
+            legacy_needs_refinement=legacy_needs,
+            legacy_reason=legacy_reason,
+        )
 
+        # STATE: optional bounded RETRIEVAL REFINE. A facet-complete discussion or
+        # strong direct lookup stops here even when the original question is deep.
         if needs_refinement and ai_calls < MAX_LOGICAL_AI_CALLS - 1:
             _emit_progress(
                 progress,
@@ -174,6 +205,8 @@ class ArchiveAnswerService:
                 candidate_count=len(report.candidates),
                 author_count=_candidate_author_count(report.candidates),
                 conversation_bridges=int(getattr(report, "conversation_bridges", 0)),
+                quality_state=str(getattr(report, "quality_state", "")),
+                reason=retrieval_reason,
             )
             observed = observed_vocabulary(report.candidates, question=question)
             corpus_hints = _corpus_hints(self.backend, plan, observed)
@@ -197,47 +230,70 @@ class ArchiveAnswerService:
                         retrieval_preview=preview,
                     ),
                     max_output_tokens=max(self.config.refinement_max_output_tokens, _MIN_REFINEMENT_OUTPUT_TOKENS),
-                    processor=parse_refinement_families,
+                    processor=lambda content: parse_refinement_families(content, question=question),
                 )
             except ProviderError:
                 return _provider_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used)
             except (ModelOutputError, CitationValidationError):
                 families = ()
+
+            families = bounded_refinement_families(plan, families)
             if families:
                 refinement_used = True
                 plan = plan.with_added_families(families)
-                _emit_progress(progress, "searching", query_count=len(plan.queries), family_count=len(plan.query_families), refined=True)
+                _emit_progress(
+                    progress,
+                    "searching",
+                    query_count=len(plan.queries),
+                    family_count=len(plan.query_families),
+                    depth=str(getattr(plan.retrieval_policy, "depth", "standard")),
+                    refined=True,
+                )
                 report = retrieve_with_plan(self.backend, plan)
                 _emit_retrieval_progress(progress, report, refined=True)
 
         candidates = report.candidates
         if not candidates:
             _emit_progress(progress, "no_evidence", reason="no_candidates")
-            answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="no_candidates")
+            answer = _insufficient_answer(
+                ai_calls=ai_calls,
+                refinement_used=refinement_used,
+                reason_code="no_candidates",
+            )
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
             return answer
 
-        # STATE: PACK + ANSWERABILITY TRIAGE
+        # STATE: PACK + ANSWERABILITY TRIAGE. Discussion-level co-location from
+        # retrieval v2 is canonical; legacy lexical signals are fallback only.
         pack = build_evidence_pack(question, candidates, self.config)
         if not pack.messages:
             _emit_progress(progress, "no_evidence", reason="no_candidates")
-            answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="no_candidates")
+            answer = _insufficient_answer(
+                ai_calls=ai_calls,
+                refinement_used=refinement_used,
+                reason_code="no_candidates",
+            )
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
             return answer
-        answerability = assess_answerability(pack, plan, report)
+
+        answerability = assess_integrated_answerability(pack, plan, report)
         _emit_progress(progress, "answerability", **answerability.to_public_dict())
 
         if ai_calls >= MAX_LOGICAL_AI_CALLS:
             _emit_progress(progress, "validation_failed", ai_calls=ai_calls, reason="budget_exhausted")
-            return _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="budget_exhausted")
+            return _structured_output_failure_answer(
+                ai_calls=ai_calls,
+                refinement_used=refinement_used,
+                reason_code="budget_exhausted",
+            )
 
         budget = self.config.budget_for(question)
         evidence_authors = len({m.author for m in pack.messages if m.author})
         extraction_prompt = claim_extraction_user_prompt(pack, plan=plan, answerability=answerability)
         extraction_kwargs = dict(
-            request_type="synthesis",  # compatibility name; semantics are claim extraction now
+            request_type="synthesis",  # external compatibility name; semantics are atomic extraction
             stage="extraction",
             api_key=api_key,
             system_prompt=CLAIM_EXTRACTION_SYSTEM_PROMPT,
@@ -248,20 +304,35 @@ class ArchiveAnswerService:
         )
 
         # STATE: EXTRACT
-        _emit_progress(progress, "synthesizing", evidence_messages=len(pack.messages), evidence_authors=evidence_authors, estimated_tokens=pack.estimated_tokens)
+        _emit_progress(
+            progress,
+            "synthesizing",
+            evidence_messages=len(pack.messages),
+            evidence_authors=evidence_authors,
+            estimated_tokens=pack.estimated_tokens,
+        )
         ai_calls += 1
         try:
             _, extraction = self._call_processed(logical_call=ai_calls, **extraction_kwargs)
         except ProviderError:
-            return _provider_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, evidence_tokens=pack.estimated_tokens)
+            return _provider_failure_answer(
+                ai_calls=ai_calls,
+                refinement_used=refinement_used,
+                evidence_tokens=pack.estimated_tokens,
+            )
         except (ModelOutputError, CitationValidationError):
             extraction = None
 
-        # Structured/citation repair is one bounded transition, never a free loop.
+        # One bounded structured/citation repair transition.
         if extraction is None:
             if ai_calls >= MAX_LOGICAL_AI_CALLS:
                 _emit_progress(progress, "validation_failed", ai_calls=ai_calls, reason="structured_output_failed")
-                return _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="structured_output_failed", evidence_tokens=pack.estimated_tokens)
+                return _structured_output_failure_answer(
+                    ai_calls=ai_calls,
+                    refinement_used=refinement_used,
+                    reason_code="structured_output_failed",
+                    evidence_tokens=pack.estimated_tokens,
+                )
             retry_tokens = _repair_tokens(budget.max_output_tokens, self.config.structured_retry_output_tokens)
             _emit_progress(progress, "repairing", ai_calls=ai_calls + 1, reason="structured_output_failed")
             ai_calls += 1
@@ -276,15 +347,25 @@ class ArchiveAnswerService:
                     },
                 )
             except ProviderError:
-                return _provider_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, evidence_tokens=pack.estimated_tokens)
+                return _provider_failure_answer(
+                    ai_calls=ai_calls,
+                    refinement_used=refinement_used,
+                    evidence_tokens=pack.estimated_tokens,
+                )
             except (ModelOutputError, CitationValidationError):
                 _emit_progress(progress, "validation_failed", ai_calls=ai_calls, reason="structured_output_failed")
-                return _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="structured_output_failed", evidence_tokens=pack.estimated_tokens)
+                return _structured_output_failure_answer(
+                    ai_calls=ai_calls,
+                    refinement_used=refinement_used,
+                    reason_code="structured_output_failed",
+                    evidence_tokens=pack.estimated_tokens,
+                )
 
         assert isinstance(extraction, ClaimExtraction)
 
-        # A model-level insufficient flag is not authoritative. Rescue only when
-        # independent archive signals say the SAME pack is plausibly answerable.
+        # A model-level insufficient flag is not authoritative. Rescue exactly
+        # once only when archive/discussion signals say this same pack is plausibly
+        # answerable and budget remains.
         if extraction.insufficient_evidence:
             if answerability.answerable and ai_calls < MAX_LOGICAL_AI_CALLS:
                 _emit_progress(progress, "repairing", ai_calls=ai_calls + 1, reason="fragmented_but_answerable")
@@ -297,39 +378,65 @@ class ArchiveAnswerService:
                             "request_type": "synthesis_recheck",
                             "stage": "answerability_rescue",
                             "system_prompt": CLAIM_EXTRACTION_SYSTEM_PROMPT + CLAIM_RESCUE_SUFFIX,
-                            "max_output_tokens": _repair_tokens(budget.max_output_tokens, self.config.structured_retry_output_tokens),
+                            "max_output_tokens": _repair_tokens(
+                                budget.max_output_tokens,
+                                self.config.structured_retry_output_tokens,
+                            ),
                         },
                     )
                 except ProviderError:
-                    return _provider_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, evidence_tokens=pack.estimated_tokens)
+                    return _provider_failure_answer(
+                        ai_calls=ai_calls,
+                        refinement_used=refinement_used,
+                        evidence_tokens=pack.estimated_tokens,
+                    )
                 except (ModelOutputError, CitationValidationError):
                     rescued = None
                 if isinstance(rescued, ClaimExtraction) and not rescued.insufficient_evidence:
                     extraction = rescued
                 else:
-                    answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="true_insufficient", evidence_tokens=pack.estimated_tokens)
+                    answer = _insufficient_answer(
+                        ai_calls=ai_calls,
+                        refinement_used=refinement_used,
+                        reason_code="true_insufficient",
+                        evidence_tokens=pack.estimated_tokens,
+                    )
                     if self.cache is not None:
                         self.cache.set(cache_key, answer)
                     return answer
             else:
-                reason = answerability.reason_code if answerability.reason_code in {"topic_found_facet_missing", "conflicting_only"} else "true_insufficient"
-                answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code=reason, evidence_tokens=pack.estimated_tokens)
+                reason = (
+                    answerability.reason_code
+                    if answerability.reason_code in {"topic_found_facet_missing", "conflicting_only", "no_candidates"}
+                    else "true_insufficient"
+                )
+                answer = _insufficient_answer(
+                    ai_calls=ai_calls,
+                    refinement_used=refinement_used,
+                    reason_code=reason,
+                    evidence_tokens=pack.estimated_tokens,
+                )
                 if self.cache is not None:
                     self.cache.set(cache_key, answer)
                 return answer
 
-        # STATE: DETERMINISTIC VERIFY, then conditional semantic VERIFY.
+        # STATE: deterministic support validation already happened during parsing;
+        # semantically paraphrased claims receive a conditional entailment verifier.
         semantic = semantic_candidates(extraction.claims)
         verdicts = ()
         if semantic:
             if ai_calls >= MAX_LOGICAL_AI_CALLS:
-                # Exact/extractive claims can still survive. Paraphrased claims never
-                # become factual output without the required verifier verdict.
                 verdicts = ()
             else:
                 verifier_prompt = claim_verifier_user_prompt(semantic)
                 expected_indices = tuple(index for index, _ in semantic)
-                _emit_progress(progress, "validating", evidence_messages=len(pack.messages), evidence_authors=evidence_authors, semantic_claims=len(semantic))
+                _emit_progress(
+                    progress,
+                    "validating",
+                    evidence_messages=len(pack.messages),
+                    evidence_authors=evidence_authors,
+                    semantic_claims=len(semantic),
+                )
                 ai_calls += 1
                 try:
                     _, verdicts = self._call_processed(
@@ -344,7 +451,11 @@ class ArchiveAnswerService:
                         processor=lambda content: parse_verifier_output(content, expected_indices),
                     )
                 except ProviderError:
-                    return _provider_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, evidence_tokens=pack.estimated_tokens)
+                    return _provider_failure_answer(
+                        ai_calls=ai_calls,
+                        refinement_used=refinement_used,
+                        evidence_tokens=pack.estimated_tokens,
+                    )
                 except (ModelOutputError, CitationValidationError):
                     verdicts = None
 
@@ -364,25 +475,45 @@ class ArchiveAnswerService:
                             processor=lambda content: parse_verifier_output(content, expected_indices),
                         )
                     except ProviderError:
-                        return _provider_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, evidence_tokens=pack.estimated_tokens)
+                        return _provider_failure_answer(
+                            ai_calls=ai_calls,
+                            refinement_used=refinement_used,
+                            evidence_tokens=pack.estimated_tokens,
+                        )
                     except (ModelOutputError, CitationValidationError):
                         verdicts = None
 
                 if verdicts is None:
                     _emit_progress(progress, "validation_failed", ai_calls=ai_calls, reason="structured_output_failed")
-                    return _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="structured_output_failed", evidence_tokens=pack.estimated_tokens)
+                    return _structured_output_failure_answer(
+                        ai_calls=ai_calls,
+                        refinement_used=refinement_used,
+                        reason_code="structured_output_failed",
+                        evidence_tokens=pack.estimated_tokens,
+                    )
 
         verified = select_verified_claims(extraction.claims, verdicts or ())
         if not verified:
             if answerability.answerable:
                 _emit_progress(progress, "validation_failed", ai_calls=ai_calls, reason="validation_failed")
-                return _structured_output_failure_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="validation_failed", evidence_tokens=pack.estimated_tokens)
-            answer = _insufficient_answer(ai_calls=ai_calls, refinement_used=refinement_used, reason_code="true_insufficient", evidence_tokens=pack.estimated_tokens)
+                return _structured_output_failure_answer(
+                    ai_calls=ai_calls,
+                    refinement_used=refinement_used,
+                    reason_code="validation_failed",
+                    evidence_tokens=pack.estimated_tokens,
+                )
+            answer = _insufficient_answer(
+                ai_calls=ai_calls,
+                refinement_used=refinement_used,
+                reason_code="true_insufficient",
+                evidence_tokens=pack.estimated_tokens,
+            )
             if self.cache is not None:
                 self.cache.set(cache_key, answer)
             return answer
 
-        # STATE: COMPOSE. No model call: prose is assembled solely from verified claims.
+        # STATE: COMPOSE. No model call: prose is assembled solely from claims
+        # already bound to exact archive support and, where needed, entailment.
         answer = compose_verified_answer(verified, pack, question=question)
         answer = replace(
             answer,
@@ -393,7 +524,13 @@ class ArchiveAnswerService:
         )
         if self.cache is not None:
             self.cache.set(cache_key, answer)
-        _emit_progress(progress, "done", evidence_used=int(answer.evidence_used_count), authors=int(answer.independent_authors_count), insufficient=False)
+        _emit_progress(
+            progress,
+            "done",
+            evidence_used=int(answer.evidence_used_count),
+            authors=int(answer.independent_authors_count),
+            insufficient=False,
+        )
         return answer
 
     def _call_processed(
@@ -433,7 +570,11 @@ class ArchiveAnswerService:
                     logical_call=logical_call,
                     evidence_count=evidence_count,
                     model=(result.model if result is not None else self.config.model),
-                    latency_ms=(result.latency_ms if result is not None else (time.perf_counter() - started) * 1000),
+                    latency_ms=(
+                        result.latency_ms
+                        if result is not None
+                        else (time.perf_counter() - started) * 1000
+                    ),
                     success=False,
                     usage=(result.usage if result is not None else None),
                     error_class=type(exc).__name__,
@@ -456,7 +597,7 @@ class ArchiveAnswerService:
 
 
 def _retrieval_preview(question: str, candidates: Sequence, config: AIConfig) -> tuple[dict[str, object], ...]:
-    """PII-redacted, bounded real archive text for the retrieval critic only."""
+    """PII-redacted bounded real archive text for the retrieval critic only."""
     if not candidates:
         return ()
     pack = build_evidence_pack(question, tuple(candidates)[:20], config)
@@ -476,6 +617,7 @@ def _emit_progress(progress: ProgressCallback | None, stage: str, **details: obj
     try:
         progress(stage, dict(details))
     except Exception:
+        # Presentation/telemetry progress must never break answer generation.
         return
 
 
@@ -489,6 +631,13 @@ def _emit_retrieval_progress(progress: ProgressCallback | None, report, *, refin
         discussion_windows=int(getattr(report, "discussion_windows", 0)),
         conversation_bridges=int(getattr(report, "conversation_bridges", 0)),
         families_with_hits=int(getattr(report, "families_with_hits", 0)),
+        discussion_count=int(getattr(report, "discussion_count", 0)),
+        facet_complete_discussions=int(getattr(report, "facet_complete_discussions", 0)),
+        topic_anchored_discussions=int(getattr(report, "topic_anchored_discussions", 0)),
+        hydrated_discussions=int(getattr(report, "hydrated_discussions", 0)),
+        required_facet_groups_total=int(getattr(report, "required_facet_groups_total", 0)),
+        max_required_facet_groups_hit=int(getattr(report, "max_required_facet_groups_hit", 0)),
+        quality_state=str(getattr(report, "quality_state", "")),
         refined=bool(refined),
     )
 
@@ -496,13 +645,21 @@ def _emit_retrieval_progress(progress: ProgressCallback | None, report, *, refin
 def _retrieval_diagnostics(report, reason: str) -> dict[str, object]:
     return {
         "assessment": reason,
+        "quality_state": str(getattr(report, "quality_state", "")),
         "candidate_count": len(report.candidates),
         "author_count": _candidate_author_count(report.candidates),
         "families_with_hits": int(getattr(report, "families_with_hits", 0)),
+        "families_executed": int(getattr(report, "families_executed", 0)),
         "hit_family_names": list(getattr(report, "hit_family_names", ())[:10]),
         "context_hydrated": int(getattr(report, "context_hydrated", 0)),
-        "discussion_windows": int(getattr(report, "discussion_windows", 0)),
-        "conversation_bridges": int(getattr(report, "conversation_bridges", 0)),
+        "discussion_count": int(getattr(report, "discussion_count", 0)),
+        "hydrated_discussions": int(getattr(report, "hydrated_discussions", 0)),
+        "facet_complete_discussions": int(getattr(report, "facet_complete_discussions", 0)),
+        "topic_anchored_discussions": int(getattr(report, "topic_anchored_discussions", 0)),
+        "topic_anchored_bridges": int(getattr(report, "topic_anchored_bridges", 0)),
+        "required_facet_groups_total": int(getattr(report, "required_facet_groups_total", 0)),
+        "max_required_facet_groups_hit": int(getattr(report, "max_required_facet_groups_hit", 0)),
+        "duplicates_suppressed": int(getattr(report, "duplicates_suppressed", 0)),
     }
 
 
@@ -515,8 +672,14 @@ def _candidate_author_count(candidates) -> int:
 
 
 def _corpus_hints(backend: SearchBackend, plan: SearchPlan, observed: tuple[str, ...]) -> tuple[str, ...]:
-    """Use vocabulary from the current local index; search hints are never evidence."""
-    seeds = tuple(dict.fromkeys((*plan.core_concepts, *plan.aliases, *plan.optional_concepts, *observed[:16])))
+    """Use vocabulary from current local index; search hints are never evidence."""
+    seeds = tuple(dict.fromkeys((
+        *tuple(getattr(plan, "topic_anchors", ()) or ()),
+        *plan.core_concepts,
+        *plan.aliases,
+        *plan.optional_concepts,
+        *observed[:16],
+    )))
     provider = getattr(backend, "corpus_hints", None)
     try:
         if callable(provider):
@@ -546,7 +709,11 @@ def _index_fingerprint(backend: SearchBackend) -> str:
     if db_path is not None:
         try:
             stat = Path(db_path).stat()
-            parts["db"] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "inode": getattr(stat, "st_ino", 0)}
+            parts["db"] = {
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "inode": getattr(stat, "st_ino", 0),
+            }
         except OSError:
             pass
     if explicit is not None:
@@ -556,9 +723,13 @@ def _index_fingerprint(backend: SearchBackend) -> str:
 
 
 def _cache_key(normalized_question: str, index_version: str, config: AIConfig) -> str:
+    # Final-answer cache is invalidated by every semantic layer, not just DB bytes.
     raw = "\n".join((
         normalized_question,
         index_version,
+        PLANNER_VERSION,
+        RETRIEVAL_SEMANTICS_VERSION,
+        INTEGRATION_POLICY_VERSION,
         PROMPT_VERSION,
         REASONING_PROMPT_VERSION,
         VALIDATION_SEMANTICS_VERSION,
@@ -590,46 +761,97 @@ def _failure_classification(exc: Exception) -> tuple[str, str]:
 def _not_searchable_answer(*, ai_calls: int) -> AnswerResult:
     return AnswerResult(
         direct_answer="سؤال قابل جست‌وجوی معناداری برای آرشیو پیدا نشد. لطفاً موضوع مشخص‌تری بفرستید.",
-        key_findings=(), disagreements=(), practical_conclusion=None,
-        confidence="low", confidence_reason="Search planner موضوع معناداری برای بازیابی آرشیو پیدا نکرد.",
-        cited_message_ids=(), source_refs=(), evidence_used_count=0, independent_authors_count=0,
-        insufficient_evidence=True, safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
-        expansion_used=False, evidence_pack_estimated_tokens=0,
+        key_findings=(),
+        disagreements=(),
+        practical_conclusion=None,
+        confidence="low",
+        confidence_reason="Search planner موضوع معناداری برای بازیابی آرشیو پیدا نکرد.",
+        cited_message_ids=(),
+        source_refs=(),
+        evidence_used_count=0,
+        independent_authors_count=0,
+        insufficient_evidence=True,
+        safety_note_if_needed=None,
+        cache_hit=False,
+        ai_calls=ai_calls,
+        expansion_used=False,
+        evidence_pack_estimated_tokens=0,
     )
 
 
 def _provider_failure_answer(*, ai_calls: int, refinement_used: bool, evidence_tokens: int = 0) -> AnswerResult:
     return AnswerResult(
         direct_answer="سرویس AI این بار پاسخ قابل پردازش نداد. این وضعیت به معنی نبود شواهد در آرشیو نیست؛ لطفاً سؤال را دوباره بفرستید.",
-        key_findings=(), disagreements=(), practical_conclusion=None,
-        confidence="low", confidence_reason="provider_failed؛ وضعیت آرشیو از خطای سرویس نتیجه‌گیری نشده است.",
-        cited_message_ids=(), source_refs=(), evidence_used_count=0, independent_authors_count=0,
-        insufficient_evidence=True, safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
-        expansion_used=refinement_used, evidence_pack_estimated_tokens=evidence_tokens,
+        key_findings=(),
+        disagreements=(),
+        practical_conclusion=None,
+        confidence="low",
+        confidence_reason="provider_failed؛ وضعیت آرشیو از خطای سرویس نتیجه‌گیری نشده است.",
+        cited_message_ids=(),
+        source_refs=(),
+        evidence_used_count=0,
+        independent_authors_count=0,
+        insufficient_evidence=True,
+        safety_note_if_needed=None,
+        cache_hit=False,
+        ai_calls=ai_calls,
+        expansion_used=refinement_used,
+        evidence_pack_estimated_tokens=evidence_tokens,
     )
 
 
 def _structured_output_failure_answer(
-    *, ai_calls: int, refinement_used: bool, reason_code: str = "structured_output_failed", evidence_tokens: int = 0
+    *,
+    ai_calls: int,
+    refinement_used: bool,
+    reason_code: str = "structured_output_failed",
+    evidence_tokens: int = 0,
 ) -> AnswerResult:
     return AnswerResult(
         direct_answer="پاسخ ساختاری سرویس AI این بار قابل اعتبارسنجی نبود. لطفاً همان سؤال را دوباره بفرستید.",
-        key_findings=(), disagreements=(), practical_conclusion=None,
-        confidence="low", confidence_reason=f"{reason_code}؛ هیچ claim تأییدنشده‌ای نمایش داده نشد.",
-        cited_message_ids=(), source_refs=(), evidence_used_count=0, independent_authors_count=0,
-        insufficient_evidence=True, safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
-        expansion_used=refinement_used, evidence_pack_estimated_tokens=evidence_tokens,
+        key_findings=(),
+        disagreements=(),
+        practical_conclusion=None,
+        confidence="low",
+        confidence_reason=f"{reason_code}؛ هیچ claim تأییدنشده‌ای نمایش داده نشد.",
+        cited_message_ids=(),
+        source_refs=(),
+        evidence_used_count=0,
+        independent_authors_count=0,
+        insufficient_evidence=True,
+        safety_note_if_needed=None,
+        cache_hit=False,
+        ai_calls=ai_calls,
+        expansion_used=refinement_used,
+        evidence_pack_estimated_tokens=evidence_tokens,
     )
 
 
 def _insufficient_answer(
-    *, ai_calls: int, refinement_used: bool, reason_code: str = "true_insufficient", evidence_tokens: int = 0
+    *,
+    ai_calls: int,
+    refinement_used: bool,
+    reason_code: str = "true_insufficient",
+    evidence_tokens: int = 0,
 ) -> AnswerResult:
     return AnswerResult(
         direct_answer="در آرشیو پیام‌های بازیابی‌شده شواهد کافی برای پاسخ قابل اتکا پیدا نشد.",
-        key_findings=(), disagreements=(), practical_conclusion=None,
-        confidence="low", confidence_reason=f"{reason_code}؛ پاسخ factual فقط با evidence پذیرفته‌شده مجاز است.",
-        cited_message_ids=(), source_refs=(), evidence_used_count=0, independent_authors_count=0,
-        insufficient_evidence=True, safety_note_if_needed=None, cache_hit=False, ai_calls=ai_calls,
-        expansion_used=refinement_used, evidence_pack_estimated_tokens=evidence_tokens,
+        key_findings=(),
+        disagreements=(),
+        practical_conclusion=None,
+        confidence="low",
+        confidence_reason=f"{reason_code}؛ پاسخ factual فقط با evidence پذیرفته‌شده مجاز است.",
+        cited_message_ids=(),
+        source_refs=(),
+        evidence_used_count=0,
+        independent_authors_count=0,
+        insufficient_evidence=True,
+        safety_note_if_needed=None,
+        cache_hit=False,
+        ai_calls=ai_calls,
+        expansion_used=refinement_used,
+        evidence_pack_estimated_tokens=evidence_tokens,
     )
+
+
+__all__ = ["AIConfigurationError", "ArchiveAnswerService", "MAX_LOGICAL_AI_CALLS"]
