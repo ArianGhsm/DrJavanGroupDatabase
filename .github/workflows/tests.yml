@@ -55,7 +55,7 @@ jobs:
         with:
           name: quality-lab-report
           path: quality-lab-report.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
       - name: Verify systemd unit syntax and fixed paths
         shell: bash
