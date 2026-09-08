@@ -22,12 +22,7 @@ def retrieve_with_plan(
     candidate_limit: int = 160,
     evidence_limit: int = 56,
 ) -> RetrievalReport:
-    """Retrieve bounded topic-anchored discussions, then hydrate only winners.
-
-    The typed planner owns query/family scheduling through `plan.queries`. This
-    engine owns ranking and discussion recovery. It consumes planner anchors,
-    facets and depth through compatibility helpers without inventing answer facts.
-    """
+    """Retrieve bounded topic-anchored discussions, then hydrate only winners."""
     prepared: list[tuple[str, SearchQuery]] = []
     seen_queries: set[str] = set()
     duplicate_queries_skipped = 0
@@ -58,12 +53,7 @@ def retrieve_with_plan(
         ))
 
     if not prepared:
-        return RetrievalReport(
-            candidates=(),
-            query_runs=0,
-            families_with_hits=0,
-            duplicate_queries_skipped=duplicate_queries_skipped,
-        )
+        return RetrievalReport((), 0, 0, duplicate_queries_skipped)
 
     queries = tuple(query for _, query in prepared)
     batch_search = getattr(backend, "search_many", None)
@@ -95,8 +85,6 @@ def retrieve_with_plan(
         required_groups=required_groups,
     )
 
-    # Generic facet matches are not evidence when the plan explicitly has a
-    # topic anchor but no actual topic hit was recovered.
     has_topic_anchor = any(discussion.topic_anchored for discussion in discussions)
     has_non_anchor_families = bool(hit_families - anchor_families)
     if anchor_families and has_non_anchor_families and not has_topic_anchor:
@@ -111,16 +99,12 @@ def retrieve_with_plan(
         ),
     )[:MAX_DISCUSSIONS])
 
-    # Planner depth changes how many winning discussions deserve context, never
-    # how much factual weight a model may assign. Hard ceilings stay local.
+    # Only typed direct lookup reduces hydration. Standard/legacy and deep plans
+    # retain retrieval-v2's verified 12-discussion cap so integration cannot lose
+    # fragmented conversation recall merely because a legacy fixture lacks policy.
     policy = getattr(plan, "retrieval_policy", None)
     depth = str(getattr(policy, "depth", "standard"))
-    if depth == "direct":
-        depth_cap = 6
-    elif depth == "deep":
-        depth_cap = 12
-    else:
-        depth_cap = 8
+    depth_cap = 6 if depth == "direct" else 12
     hydration_limit = min(depth_cap, max(4, max(1, evidence_limit) // 4))
     hydrated, hydrated_count, discussion_windows = _hydrate_top_discussions(
         backend,
@@ -133,8 +117,7 @@ def retrieve_with_plan(
 
     facet_complete = sum(1 for item in hydrated if item.facet_complete)
     hydrated_discussion_count = sum(
-        1
-        for item in hydrated
+        1 for item in hydrated
         if "adaptive_context_hydration" in item.representative.match_reasons
     )
     reason_counts = Counter(
@@ -143,12 +126,7 @@ def retrieve_with_plan(
         for reason in item.ranking_reasons
         if not reason.startswith("discussion_span:")
     )
-    quality_state = _quality_state(
-        plan,
-        hydrated,
-        candidates,
-        required_groups=required_groups,
-    )
+    quality_state = _quality_state(plan, hydrated, candidates, required_groups=required_groups)
     return RetrievalReport(
         candidates=candidates,
         query_runs=len(runs),
@@ -168,15 +146,11 @@ def retrieve_with_plan(
         families_executed=len({family for family, _query in prepared}),
         topic_anchored_discussions=sum(1 for item in hydrated if item.topic_anchored),
         required_facet_groups_total=len(required_groups),
-        max_required_facet_groups_hit=max(
-            (item.required_facet_groups_hit for item in hydrated),
-            default=0,
-        ),
+        max_required_facet_groups_hit=max((item.required_facet_groups_hit for item in hydrated), default=0),
     )
 
 
 def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
-    """Return whether one bounded planner/refinement rescue is still useful."""
     if not report.candidates:
         return True, "no_candidates"
     if report.quality_state == "facet_complete_discussion":
@@ -205,7 +179,6 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
         for c in candidates[:8]
     ):
         return False, "strong_multi_author_discussion"
-
     if report.families_executed == 1 and any(
         c.cluster_size >= 5
         and "discussion_author_diversity" in c.match_reasons
@@ -213,7 +186,6 @@ def assess_planned_retrieval(report: RetrievalReport) -> tuple[bool, str]:
         for c in candidates[:8]
     ):
         return False, "dense_single_family_discussion"
-
     if (
         len(candidates) >= 3
         and len(authors) >= 2
