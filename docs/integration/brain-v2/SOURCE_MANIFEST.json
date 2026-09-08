@@ -1,0 +1,34 @@
+{
+  "repository": "ArianGhsm/DrJavanGroupDatabase",
+  "original_base_sha": "4226f2c30a04d89a28afe8284be5c3e5f657a2a6",
+  "integration_version": "brain-v2",
+  "integration_branch": "integration/brain-v2",
+  "sources": {
+    "query_planner": {
+      "branch": "parallel/brain-query-planner-v2",
+      "tip_sha": "56e54b7ffa0830529d94968ff8cdad65be6c21f1"
+    },
+    "retrieval_engine": {
+      "branch": "parallel/brain-retrieval-engine-v2",
+      "tip_sha": "0f0d5b9c8f51b07bd4429ca398a4a70ddc366f6d"
+    },
+    "evidence_reasoner": {
+      "branch": "parallel/brain-evidence-reasoner-v2",
+      "tip_sha": "4e0e5a175809dd4607aa38cd6c964e5597aa54bb"
+    },
+    "quality_lab": {
+      "branch": "parallel/brain-quality-lab-v2",
+      "tip_sha": "2515e5ba92cee48699d3a3fd4d645cc0a417bdde"
+    }
+  },
+  "semantics": {
+    "planner_schema_version": "query-understanding-v1",
+    "retrieval_semantics_version": "discussion-retrieval-v2.1-typed-policy",
+    "integration_policy_version": "brain-v2-integration-policy-v3",
+    "reasoning_prompt_version": "evidence-reasoning-state-machine-v2.1",
+    "validation_semantics_version": "claim-support-validation-v2.2",
+    "quality_report_schema_version": "quality-lab-v2.0",
+    "max_logical_ai_calls": 4
+  },
+  "raw_archive_modified": false
+}
