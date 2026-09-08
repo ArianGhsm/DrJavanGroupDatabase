@@ -22,7 +22,7 @@ from drjavanbot.ai.reasoning import (
     select_verified_claims,
     semantic_candidates,
 )
-from drjavanbot.ai.validation import CitationValidationError, ModelOutputError
+from drjavanbot.ai.validation import CitationValidationError
 from drjavanbot.domain import MessageRecord
 from drjavanbot.search import EvidenceCandidate
 from drjavanbot.secrets import AVALAI_API_KEY_SECRET
@@ -60,7 +60,7 @@ def test_natural_grounded_paraphrase_requires_and_can_pass_entailment_verifier()
     pack = _pack("کار با این ماده راحت بود")
     extraction = parse_claim_extraction(_payload("استفاده از این ماده آسان توصیف شد", ((1, "کار با این ماده راحت بود"),)), pack)
     assert extraction.claims[0].needs_semantic_verification
-    pending = semantic_candidates(extraction.claims)
+    assert semantic_candidates(extraction.claims)
     verdicts = parse_verifier_output('{"verdicts":[{"claim_index":0,"entailed":true,"risk_ok":true}]}', (0,))
     verified = select_verified_claims(extraction.claims, verdicts)
     answer = compose_verified_answer(verified, pack, question="کار با ماده چطور بود؟")
@@ -212,7 +212,8 @@ class _Provider:
         self.calls = []
     def chat_json(self, **kwargs):
         self.calls.append(kwargs)
-        if kwargs["request_type"] == "search_plan":
+        request_type = kwargs["request_type"]
+        if request_type == "search_plan":
             question = json.loads(kwargs["user_prompt"])["question"]
             content = json.dumps({
                 "searchable": True,
@@ -222,6 +223,8 @@ class _Provider:
                 "query_families": [{"name": "topic", "queries": [question]}],
                 "phrases": [], "exclude_terms": [], "low_information_terms": [], "reply_context": True,
             }, ensure_ascii=False)
+        elif request_type == "search_refinement":
+            content = json.dumps({"query_families": []})
         else:
             value = self.scripted.pop(0)
             if isinstance(value, Exception):
@@ -329,6 +332,8 @@ def test_transient_provider_failure_is_not_cached_but_grounded_success_is():
                     "query_families": [{"name": "topic", "queries": [q]}],
                     "phrases": [], "exclude_terms": [], "low_information_terms": [], "reply_context": True,
                 }, ensure_ascii=False)
+            elif kwargs["request_type"] == "search_refinement":
+                content = json.dumps({"query_families": []})
             else:
                 content = success_payload
             return ProviderResult(content, "deepseek-v4-flash", UsageMetrics(), 1.0)
@@ -344,10 +349,17 @@ def test_transient_provider_failure_is_not_cached_but_grounded_success_is():
         assert third.cache_hit and third.ai_calls == 0
 
 
-def test_duplicate_text_is_suppressed_and_pii_redaction_remains_active():
+def test_duplicate_text_is_suppressed_per_author_and_pii_redaction_remains_active():
     a = _candidate(1, 10, "کامپوزیت تماس 09121234567")
-    b = _candidate(2, 40, "کامپوزیت تماس 09121234567", author="B")
+    b = _candidate(2, 40, "کامپوزیت تماس 09121234567")
     pack = build_evidence_pack("کامپوزیت", (a, b), AIConfig())
     assert len(pack.messages) == 1
     assert "09121234567" not in pack.messages[0].text
     assert "شماره تماس حذف شد" in pack.messages[0].text
+
+
+def test_identical_text_from_independent_authors_is_preserved_as_corroboration():
+    a = _candidate(1, 10, "کامپوزیت خوب بود", author="A")
+    b = _candidate(2, 40, "کامپوزیت خوب بود", author="B")
+    pack = build_evidence_pack("کامپوزیت", (a, b), AIConfig())
+    assert {item.message_id for item in pack.messages} == {1, 2}
