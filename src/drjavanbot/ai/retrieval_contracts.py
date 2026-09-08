@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from drjavanbot.search import EvidenceCandidate
 
+# Included in the final-answer cache namespace. Bump whenever ranking,
+# discussion/facet semantics or stopping behavior changes in a way that can
+# alter which archive evidence reaches reasoning while the SQLite index stays
+# byte-identical.
+RETRIEVAL_SEMANTICS_VERSION = "discussion-retrieval-v2.1-typed-policy"
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievalReport:
     candidates: tuple[EvidenceCandidate, ...]
@@ -24,3 +31,6 @@ class RetrievalReport:
     topic_anchored_discussions: int = 0
     required_facet_groups_total: int = 0
     max_required_facet_groups_hit: int = 0
+
+
+__all__ = ["RETRIEVAL_SEMANTICS_VERSION", "RetrievalReport"]
