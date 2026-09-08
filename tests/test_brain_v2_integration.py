@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from drjavanbot.ai.config import AIConfig
@@ -9,7 +10,7 @@ from drjavanbot.ai.models import EvidenceMessage, EvidencePack
 from drjavanbot.ai.orchestrator import _cache_key
 import drjavanbot.ai.orchestrator as orchestrator_module
 from drjavanbot.ai.planner import SearchFamily, SearchPlan
-from drjavanbot.ai.query_model import AnswerFacet, FamilyPurpose, RetrievalDepth, RetrievalPolicy
+from drjavanbot.ai.query_model import AnswerFacet, EvidencePattern, FamilyPurpose, RetrievalDepth, RetrievalPolicy
 from drjavanbot.ai.retrieval_contracts import RetrievalReport
 from drjavanbot.domain import MessageRecord
 from drjavanbot.search import EvidenceCandidate
@@ -74,11 +75,12 @@ def test_typed_planner_anchor_and_facet_contract_drive_retrieval_helpers():
 
 
 def test_missing_typed_required_facet_is_not_silently_removed():
-    plan = _typed_timing_plan()
-    plan = SearchPlan.from_dict({
-        **plan.to_dict(),
-        "query_families": [plan.query_families[0].to_dict()],
-    })
+    # Construct the consumer-side contract directly. SearchPlan.from_dict is a
+    # planner adapter and deliberately restores generic anti-omission families;
+    # this regression is specifically about retrieval refusing to shrink the
+    # denominator if a required typed facet is nevertheless absent at its boundary.
+    source = _typed_timing_plan()
+    plan = replace(source, query_families=(source.query_families[0],))
     groups = _required_family_groups(plan, _anchor_family_names(plan))
     assert len(groups) == 1
     assert next(iter(groups[0])).startswith("__missing_required_facet__:")
@@ -103,13 +105,15 @@ def test_facet_complete_deep_discussion_stops_redundant_refinement():
 
 def test_multi_source_policy_retains_one_rescue_for_sparse_single_discussion():
     plan = _typed_timing_plan()
-    plan = SearchPlan.from_dict({
-        **plan.to_dict(),
-        "retrieval_policy": {
-            **plan.retrieval_policy.to_dict(),
-            "expected_evidence_pattern": "multi_source",
-        },
-    })
+    policy = replace(
+        plan.retrieval_policy,
+        expected_evidence_pattern=EvidencePattern.MULTI_SOURCE,
+    )
+    plan = replace(
+        plan,
+        expected_evidence_pattern=EvidencePattern.MULTI_SOURCE,
+        retrieval_policy=policy,
+    )
     report = RetrievalReport(
         candidates=(_candidate(1, "ارتودنسی سن", "A"), _candidate(2, "ارتودنسی سن", "B")),
         query_runs=4,
