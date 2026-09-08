@@ -24,6 +24,7 @@ _GENERIC = {"خوب", "بد", "چی", "چیه", "چطور", "چرا", "سلام"
 @dataclass(frozen=True, slots=True)
 class _Bundle:
     discussion_hash: str
+    discussion_hashes: tuple[str, ...]
     text: str
     direct_text: str
     author: str
@@ -60,6 +61,12 @@ def _normalized_any(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(v for raw in values if (v := normalize_text(raw)))
 
 
+def _position_hash(message) -> str:
+    """PII-free legacy/gold identity for one canonical archive position."""
+    raw_key = f"p{message.source_page}:b{message.source_order // 12}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+
+
 def _bundle(candidate, case: GoldenCase) -> _Bundle:
     messages = (candidate.message, *candidate.context)
     text_parts = [normalize_text(m.text_normalized or m.text_raw) for m in messages]
@@ -73,13 +80,32 @@ def _bundle(candidate, case: GoldenCase) -> _Bundle:
         normalized_group = _normalized_any(group)
         if normalized_group and any(anchor in combined for anchor in normalized_group):
             facet_hits += 1
-    # Stable PII-free identity derived only from canonical archive position.
-    raw_key = f"p{candidate.message.source_page}:b{candidate.message.source_order // 12}"
-    discussion_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+
+    # Frozen Quality Lab gold predates discussion-v2 and identifies a discussion
+    # by the canonical position bucket of its then-representative message. The
+    # integrated retriever is allowed to choose a different representative for
+    # the SAME hydrated discussion. Therefore one discussion bundle exposes the
+    # bounded set of legacy position aliases contributed by its admitted members
+    # and context. Gold itself and thresholds remain unchanged; this is the
+    # compatibility adapter between message-representative and discussion-level
+    # retrieval units.
+    discussion_hashes = tuple(dict.fromkeys(_position_hash(message) for message in messages))
+    discussion_hash = discussion_hashes[0] if discussion_hashes else _position_hash(candidate.message)
+
     tokens = tuple(tokenize(combined))
     low_information = bool(tokens) and len(tokens) <= 3 and all(token in _GENERIC for token in tokens)
     author = candidate.message.author_normalized or candidate.message.author or ""
-    return _Bundle(discussion_hash, combined, direct, author, topic_hit, direct_topic_hit, facet_hits, low_information)
+    return _Bundle(
+        discussion_hash,
+        discussion_hashes,
+        combined,
+        direct,
+        author,
+        topic_hit,
+        direct_topic_hit,
+        facet_hits,
+        low_information,
+    )
 
 
 def evaluate_case(backend: SQLiteSearchBackend, case: GoldenCase, *, top_k: int) -> CaseMetrics:
@@ -106,9 +132,11 @@ def evaluate_case(backend: SQLiteSearchBackend, case: GoldenCase, *, top_k: int)
 
     first_relevant = (colocated_indices or relevant_indices or [None])[0]
     rr = round(1.0 / first_relevant, 4) if isinstance(first_relevant, int) and first_relevant > 0 else 0.0
+    selected_indices = colocated_indices if required_total else relevant_indices
     relevant_hashes = tuple(dict.fromkeys(
-        bundles[i - 1].discussion_hash
-        for i in (colocated_indices if required_total else relevant_indices)
+        discussion_hash
+        for index in selected_indices
+        for discussion_hash in bundles[index - 1].discussion_hashes
     ))
     discussion_recall = None
     if case.expectation == "present":
