@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from http.client import RemoteDisconnected
 import json
 import socket
 from typing import Any, Protocol
@@ -44,7 +45,8 @@ class UrllibTelegramTransport:
                 return TelegramResponse(int(response.status), response.read())
         except HTTPError as exc:
             return TelegramResponse(int(exc.code), exc.read())
-        except (URLError, socket.timeout, TimeoutError) as exc:
+        except (URLError, socket.timeout, TimeoutError, RemoteDisconnected,
+                ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
             raise TelegramNetworkError("Telegram network request failed") from exc
 
 

@@ -1,9 +1,12 @@
 from pathlib import Path
 import json
 import tempfile
+from http.client import RemoteDisconnected
+from unittest.mock import patch
+import pytest
 from urllib.parse import parse_qs
 
-from drjavanbot.telegram.api import TelegramAPI, TelegramResponse, TelegramUnauthorizedError
+from drjavanbot.telegram.api import TelegramAPI, TelegramNetworkError, TelegramResponse, TelegramUnauthorizedError, UrllibTelegramTransport
 from drjavanbot.telegram.state import BotStateStore
 
 class Transport:
@@ -30,6 +33,16 @@ def test_api_unauthorized_error_does_not_expose_token():
     except TelegramUnauthorizedError as exc:
         assert "secret-token" not in str(exc)
     else: raise AssertionError("expected unauthorized")
+
+def test_urllib_remote_disconnect_is_normalized_with_cause():
+    with patch("drjavanbot.telegram.api.urlopen", side_effect=RemoteDisconnected("closed")):
+        with pytest.raises(TelegramNetworkError) as caught:
+            UrllibTelegramTransport().request("https://example.invalid", b"", 1.0)
+    assert isinstance(caught.value.__cause__, RemoteDisconnected)
+
+def test_semantic_unauthorized_response_is_not_network_error():
+    t=Transport(status=401,payload={"ok":False,"error_code":401}); api=TelegramAPI("123:secret-token",transport=t)
+    with pytest.raises(TelegramUnauthorizedError): api.get_me()
 
 def test_state_default_is_owner_only_and_rate_is_bounded():
     with tempfile.TemporaryDirectory() as td:
