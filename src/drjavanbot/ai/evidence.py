@@ -29,16 +29,7 @@ def build_evidence_pack(
     candidates: Sequence[EvidenceCandidate],
     config: AIConfig,
 ) -> EvidencePack:
-    """Pack top discussions first, then bounded relation-aware context.
-
-    Retrieval ranking remains authoritative, but multiple hits from one local thread
-    cannot monopolize the pack before other discussions are represented. Direct
-    reply parents and corrections are privileged; context is then distributed
-    round-robin. Same-author duplicate text is suppressed while identical statements
-    from independent authors remain available as corroborating evidence. Short
-    context-dependent replies are never discarded merely for being short. All
-    existing hard token/message caps remain enforced.
-    """
+    """Pack top retrieval discussions first, then bounded relation-aware context."""
     budget = config.budget_for(question)
     max_tokens = min(budget.max_evidence_tokens, config.hard_evidence_tokens)
     max_messages = min(budget.max_messages, config.hard_messages)
@@ -193,6 +184,10 @@ def _discussion_round_robin(candidates: Sequence[EvidenceCandidate]) -> tuple[Ev
 
 
 def _discussion_key(candidate: EvidenceCandidate) -> tuple[object, ...]:
+    # Retrieval v2 already computed a bounded topic-anchored discussion identity.
+    # Preserve it instead of re-bucketing representatives differently downstream.
+    if candidate.cluster_key:
+        return ("retrieval_cluster", candidate.cluster_key)
     message = candidate.message
     if message.reply_to_message_id is not None and message.message_id is not None:
         lo = min(int(message.message_id), int(message.reply_to_message_id))
