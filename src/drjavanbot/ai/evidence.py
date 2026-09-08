@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import replace
 import math
 import re
@@ -13,10 +14,11 @@ from .models import EvidenceMessage, EvidencePack
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?98|0)?9\d{9}(?!\d)")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _INVITE_RE = re.compile(r"https?://t\.me/(?:joinchat/|\+)[^\s<]+", re.I)
+_CORRECTION_RE = re.compile(r"(?:اصلاح|اشتباه|درستش|برعکس|نه[،,: ]|correction|wrong)", re.I)
+_DISCUSSION_BUCKET = 18
 
 
 def estimate_tokens(text: str) -> int:
-    """Conservative multilingual estimate used only for hard local budgeting."""
     if not text:
         return 0
     return max(1, math.ceil(len(text) / 3.0))
@@ -27,38 +29,32 @@ def build_evidence_pack(
     candidates: Sequence[EvidenceCandidate],
     config: AIConfig,
 ) -> EvidencePack:
-    """Pack diverse anchors first, then bounded conversation context.
+    """Pack top discussions first, then bounded relation-aware context.
 
-    Retrieval candidates are already ranked/diversified. Context must not undo
-    that work by letting the first thread consume the whole evidence budget. At
-    the same time, a real archive discussion often spans several consecutive or
-    reply messages where only one message repeats the searched term. Retrieval
-    marks those anchors with ``discussion_window``. In that case we reserve up to
-    roughly one third of message slots for conversation context, while preserving
-    the same hard message/token ceilings.
-
-    Direct reply relations and nearest/topically-linked neighbors are consumed
-    before farther context. This improves conversation coverage without creating
-    any extra AI call or allowing context expansion to exceed the configured
-    evidence-token budget.
+    Retrieval ranking remains authoritative, but multiple hits from one local thread
+    cannot monopolize the pack before other discussions are represented. Direct
+    reply parents and corrections are privileged; context is then distributed
+    round-robin. Same-author duplicate text is suppressed while identical statements
+    from independent authors remain available as corroborating evidence. Short
+    context-dependent replies are never discarded merely for being short. All
+    existing hard token/message caps remain enforced.
     """
     budget = config.budget_for(question)
     max_tokens = min(budget.max_evidence_tokens, config.hard_evidence_tokens)
     max_messages = min(budget.max_messages, config.hard_messages)
     items: list[EvidenceMessage] = []
     seen_refs: set[str] = set()
-    used_tokens = estimate_tokens(question) + 120  # envelope/schema allowance
+    seen_texts: set[str] = set()
+    used_tokens = estimate_tokens(question) + 120
 
-    has_context = any(candidate.context for candidate in candidates)
+    ordered_candidates = _discussion_round_robin(candidates)
+    has_context = any(candidate.context for candidate in ordered_candidates)
     discussion_heavy = sum(
-        1 for candidate in candidates[:12]
+        1 for candidate in ordered_candidates[:12]
         if "discussion_window" in set(candidate.match_reasons)
     ) >= 2
     if has_context and max_messages >= 4:
-        if discussion_heavy:
-            context_reserve = min(10, max(4, max_messages // 3))
-        else:
-            context_reserve = min(6, max(2, max_messages // 4))
+        context_reserve = min(10, max(4, max_messages // 3)) if discussion_heavy else min(6, max(2, max_messages // 4))
     else:
         context_reserve = 0
     primary_soft_limit = max(1, max_messages - context_reserve)
@@ -67,9 +63,7 @@ def build_evidence_pack(
     selected: list[EvidenceCandidate] = []
     deferred_candidates: list[EvidenceCandidate] = []
 
-    # Phase 1: preserve rank/diversity by admitting many primary messages before
-    # any neighborhood expansion can consume the pack.
-    for candidate in candidates:
+    for candidate in ordered_candidates:
         if len(items) >= primary_soft_limit or used_tokens >= primary_token_soft_cap:
             deferred_candidates.append(candidate)
             continue
@@ -78,15 +72,13 @@ def build_evidence_pack(
         if primary is None:
             deferred_candidates.append(candidate)
             continue
-        if primary.source_ref in seen_refs:
+        if _already_seen(primary, seen_refs, seen_texts):
             continue
         items.append(primary)
-        seen_refs.add(primary.source_ref)
+        _mark_seen(primary, seen_refs, seen_texts)
         used_tokens += cost
         selected.append(candidate)
 
-    # Phase 2: reply parents are semantically privileged context. Add one direct
-    # parent per selected primary before ordinary before/after messages.
     reply_parent_refs: set[str] = set()
     for candidate in selected:
         if len(items) >= max_messages:
@@ -95,7 +87,7 @@ def build_evidence_pack(
         if parent_id is None:
             continue
         parent = next((ctx for ctx in candidate.context if ctx.message_id == parent_id), None)
-        if parent is None or not parent.source_locator or parent.source_locator in seen_refs:
+        if parent is None or not parent.source_locator:
             continue
         context, cost = _fit_item(
             _context_message(parent, parent_ref=candidate.message.source_locator, role="reply_context"),
@@ -104,21 +96,16 @@ def build_evidence_pack(
         )
         if context is None:
             break
+        if _already_seen(context, seen_refs, seen_texts):
+            continue
         items.append(context)
-        seen_refs.add(context.source_ref)
+        _mark_seen(context, seen_refs, seen_texts)
         reply_parent_refs.add(context.source_ref)
         used_tokens += cost
 
-    # Phase 3: distribute remaining conversation context round-robin across
-    # selected primaries. Each bucket is internally ordered so direct replies,
-    # nearest chronological neighbors and topical continuations beat distant
-    # messages when the token budget is tight.
     buckets: list[tuple[EvidenceCandidate, list]] = []
     for candidate in selected:
-        remaining = [
-            ctx for ctx in candidate.context
-            if ctx.source_locator and ctx.source_locator not in reply_parent_refs
-        ]
+        remaining = [ctx for ctx in candidate.context if ctx.source_locator and ctx.source_locator not in reply_parent_refs]
         remaining.sort(key=lambda record: _context_priority(record, candidate))
         if remaining:
             buckets.append((candidate, remaining))
@@ -130,40 +117,34 @@ def build_evidence_pack(
             if len(items) >= max_messages:
                 break
             record = records.pop(0)
-            if record.source_locator in seen_refs:
-                if records:
-                    next_buckets.append((candidate, records))
-                continue
             role = "reply_context" if record.reply_to_message_id == candidate.message.message_id else "context"
             context, cost = _fit_item(
                 _context_message(record, parent_ref=candidate.message.source_locator, role=role),
                 max_tokens - used_tokens,
                 budget.per_context_chars,
             )
-            if context is not None:
+            if context is not None and not _already_seen(context, seen_refs, seen_texts):
                 items.append(context)
-                seen_refs.add(context.source_ref)
+                _mark_seen(context, seen_refs, seen_texts)
                 used_tokens += cost
                 progressed = True
             if records:
                 next_buckets.append((candidate, records))
-        if not progressed:
+        if not progressed and not next_buckets:
             break
         buckets = next_buckets
 
-    # Phase 4: if reserved context was not needed, use any remaining budget for
-    # additional lower-ranked primaries rather than wasting capacity.
     for candidate in deferred_candidates:
         if len(items) >= max_messages:
             break
         primary = _message_from_candidate(candidate, budget)
-        if primary.source_ref in seen_refs:
-            continue
         primary, cost = _fit_item(primary, max_tokens - used_tokens, budget.per_primary_chars)
         if primary is None:
             break
+        if _already_seen(primary, seen_refs, seen_texts):
+            continue
         items.append(primary)
-        seen_refs.add(primary.source_ref)
+        _mark_seen(primary, seen_refs, seen_texts)
         used_tokens += cost
 
     return EvidencePack(
@@ -176,7 +157,6 @@ def build_evidence_pack(
 
 
 def assess_retrieval(candidates: Sequence[EvidenceCandidate]) -> tuple[bool, str]:
-    """Backward-compatible legacy retrieval assessment."""
     if not candidates:
         return True, "no_candidates"
     top = candidates[0]
@@ -192,6 +172,33 @@ def assess_retrieval(candidates: Sequence[EvidenceCandidate]) -> tuple[bool, str
     if len(candidates) <= 1 and top.local_score < 5.0:
         return True, "single_weak_candidate"
     return False, "adequate_local_retrieval"
+
+
+def _discussion_round_robin(candidates: Sequence[EvidenceCandidate]) -> tuple[EvidenceCandidate, ...]:
+    groups: OrderedDict[tuple[object, ...], list[EvidenceCandidate]] = OrderedDict()
+    for candidate in candidates:
+        groups.setdefault(_discussion_key(candidate), []).append(candidate)
+    out: list[EvidenceCandidate] = []
+    depth = 0
+    while True:
+        progressed = False
+        for values in groups.values():
+            if depth < len(values):
+                out.append(values[depth])
+                progressed = True
+        if not progressed:
+            break
+        depth += 1
+    return tuple(out)
+
+
+def _discussion_key(candidate: EvidenceCandidate) -> tuple[object, ...]:
+    message = candidate.message
+    if message.reply_to_message_id is not None and message.message_id is not None:
+        lo = min(int(message.message_id), int(message.reply_to_message_id))
+        hi = max(int(message.message_id), int(message.reply_to_message_id))
+        return (message.source_file, "reply", lo, hi)
+    return (message.source_file, message.source_page, int(message.source_order) // _DISCUSSION_BUCKET)
 
 
 def _message_from_candidate(candidate: EvidenceCandidate, budget: EvidenceBudget) -> EvidenceMessage:
@@ -223,7 +230,7 @@ def _context_message(record, *, parent_ref: str, role: str) -> EvidenceMessage:
     )
 
 
-def _context_priority(record, candidate: EvidenceCandidate) -> tuple[int, int, int, int, int]:
+def _context_priority(record, candidate: EvidenceCandidate) -> tuple[int, int, int, int, int, int]:
     anchor = candidate.message
     if record.message_id == anchor.reply_to_message_id or record.reply_to_message_id == anchor.message_id:
         relation = 0
@@ -233,17 +240,39 @@ def _context_priority(record, candidate: EvidenceCandidate) -> tuple[int, int, i
         relation = 2
 
     text = normalize_text(record.text_normalized or record.text_raw)
+    correction_priority = 0 if _CORRECTION_RE.search(text) else 1
     topical_hits = 0
     for raw_term in candidate.matched_terms[:8]:
         term = normalize_text(raw_term)
         if term and term in text:
             topical_hits += 1
-
     if record.source_page == anchor.source_page:
         distance = abs(record.source_order - anchor.source_order)
     else:
         distance = 10_000 + abs(record.source_page - anchor.source_page) * 100
-    return (relation, -topical_hits, distance, record.source_page, record.source_order)
+    return (relation, correction_priority, -topical_hits, distance, record.source_page, record.source_order)
+
+
+def _already_seen(item: EvidenceMessage, seen_refs: set[str], seen_texts: set[str]) -> bool:
+    if item.source_ref in seen_refs:
+        return True
+    fingerprint = _text_fingerprint(item)
+    return bool(fingerprint and fingerprint in seen_texts)
+
+
+def _mark_seen(item: EvidenceMessage, seen_refs: set[str], seen_texts: set[str]) -> None:
+    seen_refs.add(item.source_ref)
+    fingerprint = _text_fingerprint(item)
+    if fingerprint:
+        seen_texts.add(fingerprint)
+
+
+def _text_fingerprint(item: EvidenceMessage) -> str:
+    text = re.sub(r"\s+", " ", normalize_text(item.text).casefold()).strip()
+    if not text:
+        return ""
+    author = normalize_text(item.author or "").casefold().strip()
+    return f"{author}\x1f{text}"
 
 
 def _fit_item(item: EvidenceMessage, remaining_tokens: int, preferred_chars: int) -> tuple[EvidenceMessage | None, int]:

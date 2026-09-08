@@ -244,12 +244,13 @@ def test_malformed_planner_fallback_is_not_cached(tmp_path: Path):
     assert cache.stats()["entries"] == 1
 
 
-def test_planner_provider_timeout_and_rate_limit_do_not_loop():
+def test_planner_provider_timeout_and_rate_limit_are_controlled_without_loop():
     backend = RoutingBackend({})
     for error in (ProviderTimeoutError("timeout"), RateLimitError("rate")):
         provider = SequenceProvider([error])
-        with pytest.raises(type(error)):
-            ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider).answer("کامپوزیت")
+        result = ArchiveAnswerService(backend=backend, secret_store=Secrets(), config=AIConfig(), provider=provider).answer("کامپوزیت")
+        assert result.insufficient_evidence and result.ai_calls == 1
+        assert "provider_failed" in result.confidence_reason
         assert len(provider.calls) == 1 and provider.calls[0]["request_type"] == "search_plan"
 
 
