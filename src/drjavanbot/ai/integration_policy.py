@@ -5,19 +5,14 @@ from typing import Sequence
 
 from .reasoning import AnswerabilityAssessment, assess_answerability
 
-INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v1"
+INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v2"
 
 _COMPLETE_STATES = {"facet_complete_discussion", "strong_direct_answer_candidate"}
 _RESCUE_STATES = {"only_topical_facet_missing", "generic_noisy_coverage", "no_candidates"}
 
 
 def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, legacy_reason: str) -> tuple[bool, str]:
-    """Reconcile planner policy with discussion-retrieval quality.
-
-    Retrieval v2 knows whether requested facets actually co-locate in a topic
-    discussion. A deep planner plan therefore must not force an unnecessary AI
-    refinement after retrieval already proved facet completeness.
-    """
+    """Reconcile typed planner depth with discussion-retrieval quality."""
     policy = getattr(plan, "retrieval_policy", None)
     rescue_allowed = bool(getattr(policy, "rescue_allowed", True))
     if not rescue_allowed:
@@ -31,6 +26,14 @@ def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, lega
         return True, quality
 
     depth = str(getattr(policy, "depth", "standard") or "standard")
+    if depth == "direct":
+        # Direct lookup asks the archive for a topic/entity itself. Once topical
+        # candidates exist, a semantic query-refinement call is usually pure cost;
+        # extraction/validation can still conclude true insufficiency safely.
+        if tuple(getattr(report, "candidates", ()) or ()):
+            return False, "direct_policy_candidate_coverage"
+        return True, "direct_policy_no_candidates"
+
     if depth == "deep":
         total = int(getattr(report, "required_facet_groups_total", 0) or 0)
         hit = int(getattr(report, "max_required_facet_groups_hit", 0) or 0)
@@ -51,9 +54,9 @@ def bounded_refinement_families(plan, families: Sequence) -> tuple:
 def assess_integrated_answerability(pack, plan, report) -> AnswerabilityAssessment:
     """Prefer discussion-level co-location signals, retain legacy fallback.
 
-    This function decides whether extraction deserves a chance; it never creates
-    facts. Every displayed claim is still bound to exact admitted archive support
-    and, when needed, the semantic entailment verifier.
+    This decides whether extraction deserves a chance; it never creates facts.
+    Every displayed claim is still exact-support validated and, when needed,
+    semantically verified against only its admitted archive quotes.
     """
     base = assess_answerability(pack, plan, report)
     if not pack.messages:
