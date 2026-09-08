@@ -137,7 +137,7 @@ def _prepare_release(sha: str, python_exe: str) -> Path:
     reused = _reuse_active_venv(release)
     if not reused and not (venv / "bin/python").exists():
         shutil.rmtree(venv, ignore_errors=True)
-        _run([python_exe, "-m", "venv", str(venv)])
+        _run([python_exe, "-m", "venv", "--system-site-packages", str(venv)])
 
     vpython = str(venv / "bin/python")
     if not reused:

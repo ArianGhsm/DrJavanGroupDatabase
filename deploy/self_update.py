@@ -295,7 +295,7 @@ def _prepare_release(
     venv = release / ".venv"
     if not (venv / "bin/python").exists():
         shutil.rmtree(venv, ignore_errors=True)
-        _run([python_exe, "-m", "venv", str(venv)], timeout=180)
+        _run([python_exe, "-m", "venv", "--system-site-packages", str(venv)], timeout=180)
     pip_python = venv / "bin/python"
     if request_id:
         _progress(
