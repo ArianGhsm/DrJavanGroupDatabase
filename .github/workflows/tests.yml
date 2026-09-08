@@ -2,7 +2,7 @@ name: DrJavanBot tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, parallel/brain-quality-lab-v2]
   pull_request:
 
 permissions:
@@ -42,8 +42,21 @@ jobs:
           test "$DRJAVAN_ARCHIVE_DIR" = "گروه دکتر جوان"
       - name: Test
         run: pytest -q
-      - name: Full archive semantic retrieval benchmark
-        run: drjavanbot --archive-dir "گروه دکتر جوان" semantic-benchmark --strict --top-k 12
+      - name: Full archive Quality Lab strict gate
+        run: |
+          drjavanbot --archive-dir "گروه دکتر جوان" quality-eval \
+            --strict \
+            --top-k 12 \
+            --base-sha 4226f2c30a04d89a28afe8284be5c3e5f657a2a6 \
+            --json-out quality-lab-report.json
+      - name: Upload PII-safe Quality Lab report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-lab-report
+          path: quality-lab-report.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify systemd unit syntax and fixed paths
         shell: bash
         run: |

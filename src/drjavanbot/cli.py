@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime
 import json
 from pathlib import Path
+import sys
 
 from drjavanbot.benchmark import benchmark_archive
 from drjavanbot.config import Settings
@@ -12,6 +13,8 @@ from drjavanbot.health import local_index_health
 from drjavanbot.search import SQLiteSearchBackend, SearchQuery
 from drjavanbot.semantic_benchmark import semantic_benchmark_archive
 from drjavanbot.storage import full_reindex, incremental_index
+from drjavanbot.ai.semantic_eval import run_quality_eval
+from drjavanbot.ai.eval.reporting import human_summary
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +48,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict",
         action="store_true",
         help="Return non-zero when stable present/absent retrieval gates fail",
+    )
+
+    quality = sub.add_parser(
+        "quality-eval",
+        help="Run the v2 Quality Lab with one full-archive index and PII-safe reports",
+    )
+    quality.add_argument("--top-k", type=int, default=12)
+    quality.add_argument("--base-sha", default="unknown")
+    quality.add_argument("--json-out", type=Path)
+    quality.add_argument(
+        "--strict",
+        action="store_true",
+        help="Return non-zero when frozen quality/safety gates fail",
     )
     return parser
 
@@ -85,6 +101,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "semantic-benchmark":
         report = semantic_benchmark_archive(archive_dir, top_k=args.top_k)
         print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+        return 0 if (not args.strict or report.passed) else 1
+    if args.command == "quality-eval":
+        report = run_quality_eval(archive_dir, top_k=args.top_k, base_sha=args.base_sha)
+        payload = report.as_dict()
+        if args.json_out is not None:
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(human_summary(report), file=sys.stderr)
         return 0 if (not args.strict or report.passed) else 1
     return 2
 
