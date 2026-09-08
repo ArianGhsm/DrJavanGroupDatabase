@@ -144,7 +144,9 @@ def _prepare_release(sha: str, python_exe: str) -> Path:
     if not reused:
         _pip_install(vpython, ["-r", "requirements.lock"], cwd=release)
         _pip_install(vpython, ["-r", "requirements-dev.lock"], cwd=release)
-    _run([vpython, "-m", "pip", "install", "--no-deps", "--no-build-isolation", "."], cwd=release)
+    build_env = dict(os.environ)
+    build_env["PYTHONPATH"] = "/usr/lib/python3/dist-packages" + (":" + build_env["PYTHONPATH"] if build_env.get("PYTHONPATH") else "")
+    _run([vpython, "-m", "pip", "install", "--no-deps", "--no-build-isolation", "."], cwd=release, env=build_env)
     return release
 
 
