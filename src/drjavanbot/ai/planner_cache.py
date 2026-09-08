@@ -6,13 +6,15 @@ import sqlite3
 import time
 
 from .planner import SearchPlan
+from .query_model import QUERY_MODEL_VERSION
 
 
 class SearchPlanCache:
-    """Small resilient SQLite cache for semantic search plans.
+    """Small resilient SQLite cache for versioned semantic search plans.
 
-    The caller includes index fingerprint and planner version in the key, so an
-    archive/index change invalidates old plans without destructive migrations.
+    The caller includes index fingerprint and planner version in the key. The
+    payload also carries QUERY_MODEL_VERSION so structurally valid stale plans
+    fail closed even if a cache key is accidentally reused by another caller.
     """
 
     def __init__(self, path: Path, *, ttl_seconds: int = 86400) -> None:
@@ -41,7 +43,7 @@ class SearchPlanCache:
                     con.execute("DELETE FROM search_plan_cache WHERE cache_key=?", (key,))
                     return None
                 payload = json.loads(row["payload_json"])
-                if not isinstance(payload, dict):
+                if not isinstance(payload, dict) or payload.get("schema_version") != QUERY_MODEL_VERSION:
                     raise ValueError
                 return SearchPlan.from_dict(payload, question=question)
         except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError, OSError):
