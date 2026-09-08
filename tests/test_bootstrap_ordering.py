@@ -46,7 +46,13 @@ def test_bootstrap_repairs_legacy_env_before_release_prepare_and_tests(tmp_path,
     monkeypatch.setattr(module, "_install_units", lambda: events.append("install_units"))
     monkeypatch.setattr(module, "_run", lambda *args, **kwargs: None)
     monkeypatch.setattr(module, "_wait_service_active", lambda: events.append("service_active"))
+    monkeypatch.setattr(
+        module,
+        "_record_bootstrap_success",
+        lambda *args, **kwargs: events.append("record_success"),
+    )
 
     assert module.main() == 0
     assert events[:4] == ["repair_env", "prepare_release", "run_tests", "publish_release"]
     assert events.index("publish_release") < events.index("switch_current")
+    assert events.index("service_active") < events.index("record_success")
