@@ -12,6 +12,7 @@ from drjavanbot.ai.retrieval import retrieve_with_plan
 from drjavanbot.normalization import normalize_text, tokenize
 from drjavanbot.search import SQLiteSearchBackend
 from drjavanbot.storage import full_reindex
+from .gates import quality_gate_failures
 from .golden import golden_cases
 from .grounding import run_grounding_red_team
 from .schema import AggregateMetrics, CaseMetrics, GoldenCase, QualityReport, REPORT_SCHEMA_VERSION
@@ -116,7 +117,7 @@ def evaluate_case(backend: SQLiteSearchBackend, case: GoldenCase, *, top_k: int)
             gold = set(case.gold_discussion_hashes)
             discussion_recall = round(len(retrieved & gold) / len(gold), 4) if gold else 0.0
         else:
-            # Baseline-discovery mode. Final regression cases freeze hashes from BASE_SHA.
+            # Baseline-discovery mode only. Final strict cases freeze BASE_SHA hashes.
             discussion_recall = 1.0 if relevant_hashes else 0.0
 
     topic_relevance = round(len(relevant_indices) / len(bundles), 4) if bundles and case.topic_anchors else None
@@ -131,14 +132,21 @@ def evaluate_case(backend: SQLiteSearchBackend, case: GoldenCase, *, top_k: int)
     context_recovery = round(context_only / len(relevant_indices), 4) if relevant_indices else None
     noise_rate = round(sum(1 for b in bundles if b.low_information) / len(bundles), 4) if bundles else 0.0
     facet_complete = None if not required_total else bool(colocated_indices)
+    supported = bool(colocated_indices or (not required_total and relevant_indices))
 
     gate_passed = True
     reason = "observe_only"
     owner = "none"
     if case.expectation == "absent":
-        gate_passed = len(report.candidates) == 0
-        reason = "absent_clean" if gate_passed else "unexpected_candidates"
-        owner = "none" if gate_passed else "retrieval"
+        # Retrieval may surface lexical/fallback candidates for an unseen query.
+        # The safety contract is that none of them form relevant supported evidence.
+        gate_passed = not supported
+        if gate_passed:
+            reason = "absent_clean" if not report.candidates else "absent_irrelevant_only"
+            owner = "none"
+        else:
+            reason = "unexpected_relevant_evidence"
+            owner = "retrieval"
     elif case.expectation == "present":
         if report.query_runs == 0:
             gate_passed, reason, owner = False, "planner_no_queries", "planner"
@@ -154,8 +162,16 @@ def evaluate_case(backend: SQLiteSearchBackend, case: GoldenCase, *, top_k: int)
             gate_passed, reason, owner = False, "generic_noise_dominates", "retrieval"
         else:
             gate_passed, reason, owner = True, "discussion_and_facets_recovered", "none"
+    else:
+        if report.query_runs == 0:
+            reason, owner = "observe_planner_no_queries", "planner"
+        elif not report.candidates:
+            reason, owner = "observe_no_candidates", "retrieval"
+        elif case.topic_anchors and not relevant_indices:
+            reason, owner = "observe_no_relevant_discussion", "retrieval"
+        elif required_total and not colocated_indices:
+            reason, owner = "observe_facet_not_colocated", "retrieval"
 
-    supported = bool(colocated_indices or (not required_total and relevant_indices))
     return CaseMetrics(
         case_id=case.case_id,
         category=case.category,
@@ -235,7 +251,16 @@ def run_quality_eval(archive_dir: Path, *, top_k: int = 12, base_sha: str = "unk
         cases = tuple(evaluate_case(backend, case, top_k=bounded_top_k) for case in golden_cases())
         grounding = run_grounding_red_team()
         scripted = run_scripted_e2e()
-        strict_failures = tuple(c.case_id for c in cases if not c.gate_passed)
+        aggregate = _aggregate(cases, scripted)
+        strict_failures = [c.case_id for c in cases if not c.gate_passed]
+        strict_failures.extend(
+            quality_gate_failures(
+                aggregate,
+                grounding,
+                scripted,
+                index_seconds=index_report.elapsed_seconds,
+            )
+        )
         return QualityReport(
             base_sha=base_sha,
             schema_version=REPORT_SCHEMA_VERSION,
@@ -245,9 +270,9 @@ def run_quality_eval(archive_dir: Path, *, top_k: int = 12, base_sha: str = "unk
             archive_files=index_report.archive_files,
             message_count=index_report.messages,
             cases=cases,
-            aggregate=_aggregate(cases, scripted),
+            aggregate=aggregate,
             grounding=grounding,
             scripted=scripted,
-            strict_failures=strict_failures,
+            strict_failures=tuple(strict_failures),
             pii_safe=True,
         )
