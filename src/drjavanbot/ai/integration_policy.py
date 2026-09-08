@@ -5,18 +5,29 @@ from typing import Sequence
 
 from .reasoning import AnswerabilityAssessment, assess_answerability
 
-INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v4"
+INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v5"
 
 _COMPLETE_STATES = {"facet_complete_discussion", "strong_direct_answer_candidate"}
 _RESCUE_STATES = {"only_topical_facet_missing", "generic_noisy_coverage", "no_candidates"}
 
 
 def _candidate_author_count(report) -> int:
-    return len({
-        candidate.message.author_normalized or candidate.message.author
-        for candidate in tuple(getattr(report, "candidates", ()) or ())[:16]
-        if candidate.message.author_normalized or candidate.message.author
-    })
+    authors: set[str] = set()
+    for candidate in tuple(getattr(report, "candidates", ()) or ())[:16]:
+        values = (candidate.message, *tuple(getattr(candidate, "context", ()) or ())[:20])
+        for message in values:
+            author = getattr(message, "author_normalized", None) or getattr(message, "author", None)
+            if author:
+                authors.add(str(author))
+    return len(authors)
+
+
+def _effective_hit_count(report) -> int:
+    candidates = tuple(getattr(report, "candidates", ()) or ())
+    return max(
+        len(candidates),
+        max((int(getattr(candidate, "cluster_size", 1) or 1) for candidate in candidates), default=0),
+    )
 
 
 def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, legacy_reason: str) -> tuple[bool, str]:
@@ -29,7 +40,6 @@ def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, lega
     quality = str(getattr(report, "quality_state", "") or "")
     depth = str(getattr(policy, "depth", "standard") or "standard")
     expected = str(getattr(policy, "expected_evidence_pattern", "single_message") or "single_message")
-    candidates = tuple(getattr(report, "candidates", ()) or ())
     author_count = _candidate_author_count(report)
     discussion_count = int(getattr(report, "discussion_count", 0) or 0)
 
@@ -46,11 +56,11 @@ def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, lega
         return False, quality
 
     if depth == "direct":
-        # Direct lookup must not become deep merely because the planner provider
-        # failed or legacy ranking is conservative. Two independent archive hits
-        # are already enough to attempt exact-support extraction; sparse/one-voice
-        # coverage still gets one bounded retrieval rescue.
-        if len(candidates) >= 2 and author_count >= 2:
+        # Discussion retrieval may collapse several exact hits into one
+        # representative and carry the remaining authors in context. Count that
+        # admitted discussion evidence instead of treating one representative as
+        # one hit/voice and buying an unnecessary AI refinement.
+        if _effective_hit_count(report) >= 2 and author_count >= 2:
             return False, "direct_policy_diverse_coverage"
         return bool(legacy_needs_refinement), str(legacy_reason)
 
