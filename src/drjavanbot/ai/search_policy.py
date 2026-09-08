@@ -10,11 +10,26 @@ from .query_model import EvidencePattern, RetrievalDepth, RetrievalPolicy
 # These are language/intent markers only. They intentionally contain no dental
 # entities, ages, doses, products, guidelines or answer facts.
 _FACET_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("timing_age", ("چه سنی", "چند سالگی", "از چه سن", "در چه سن", "سن مناسب", "سن شروع", "age", "what age", "how old")),
+    ("prevalence", ("شایع", "شایع تر", "شایع ترین", "رایج", "رایج تر", "رایج ترین", "most common", "commonest", "prevalence", "prevalent")),
+    ("frequency", ("فراوانی", "frequency", "چند درصد")),
+    ("epidemiology", ("اپیدمیولوژی", "epidemiology", "شیوع")),
+    ("definition", ("تعریف", "چیست", "چیه", "what is", "define")),
+    ("classification", ("طبقه بندی", "دسته بندی", "انواع", "classification", "types of")),
+    ("diagnosis", ("تشخیص", "diagnosis", "diagnose")),
+    ("differential_diagnosis", ("تشخیص افتراقی", "دیفرانسیل", "differential diagnosis", "ddx")),
+    ("treatment", ("درمان", "treatment", "management")),
+    ("contraindication", ("کنتراندیکاسیون", "منع مصرف", "contraindication", "contraindicated")),
+    ("recurrence", ("عود", "recurrence", "recur")),
+    ("follow_up", ("پیگیری", "فالوآپ", "follow up", "follow-up")),
+    ("salary", ("حقوق", "درآمد", "دستمزد", "salary", "income", "compensation", "wage")),
+    ("cost", ("هزینه", "قیمت", "cost", "price", "fee")),
+    ("career", ("بازار کار", "تازه فارغ", "فارغ التحصیل", "career", "job", "new graduate")),
+    ("regulation", ("قانون", "مقررات", "آیین نامه", "مجوز", "regulation", "law", "license")),
+    ("timing_age", (" سن ", "چه سنی", "چند سالگی", "از چه سن", "در چه سن", "سن مناسب", "سن شروع", "age", "what age", "how old")),
     ("timing", ("چه زمانی", "چه موقع", "کی باید", "زمان شروع", "زمان مناسب", "when", "timing")),
     ("pediatric_population", ("بچه", "بچه ها", "کودک", "کودکان", "اطفال", "نوجوان", "child", "children", "pediatric", "adolescent")),
     ("comparison", ("مقایسه", "کدوم بهتر", "کدام بهتر", " یا ", " vs ", "versus", "compare", "which is better")),
-    ("recommendation", ("کدوم", "کدام", "پیشنهاد", "توصیه", "خوبه", "خوب است", "بهترین", "recommend", "recommended", "best")),
+    ("recommendation", ("پیشنهاد", "توصیه", "خوبه", "خوب است", "بهترین", "recommend", "recommended", "best")),
     ("cause_reason", ("چرا", "علت", "دلیل", "به چه علت", "cause", "reason", "why")),
     ("method_how", ("چطور", "چگونه", "روش", "مراحل", "نحوه", "how", "technique", "steps")),
     ("dosage", ("دوز", "دوزاژ", "dose", "dosage")),
@@ -25,7 +40,22 @@ _FACET_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _FACET_QUERY_TERMS: dict[str, tuple[str, ...]] = {
-    "timing_age": ("سن", "سالگی", "سن شروع", "age"),
+    "prevalence": ("شایع", "رایج", "شایع ترین", "most common", "prevalence"),
+    "frequency": ("فراوانی", "frequency", "درصد"),
+    "epidemiology": ("شیوع", "اپیدمیولوژی", "epidemiology", "prevalence"),
+    "definition": ("تعریف", "یعنی", "definition"),
+    "classification": ("انواع", "طبقه بندی", "classification"),
+    "diagnosis": ("تشخیص", "diagnosis"),
+    "differential_diagnosis": ("تشخیص افتراقی", "differential diagnosis", "ddx"),
+    "treatment": ("درمان", "treatment", "management"),
+    "contraindication": ("کنتراندیکاسیون", "منع مصرف", "contraindication"),
+    "recurrence": ("عود", "recurrence"),
+    "follow_up": ("پیگیری", "follow up"),
+    "salary": ("حقوق", "درآمد", "دستمزد", "salary", "income"),
+    "cost": ("هزینه", "قیمت", "cost", "price"),
+    "career": ("بازار کار", "فارغ التحصیل", "career", "job"),
+    "regulation": ("قانون", "مقررات", "مجوز", "regulation", "law"),
+    "timing_age": ("سن", "سالگی", "سن شروع", "زمان", "age", "timing"),
     "timing": ("زمان", "زمان شروع", "چه زمانی", "timing"),
     "pediatric_population": ("کودک", "بچه", "نوجوان", "pediatric"),
     "comparison": ("مقایسه", "بهتر", "versus", "compare"),
@@ -42,8 +72,10 @@ _FACET_QUERY_TERMS: dict[str, tuple[str, ...]] = {
 _DEEP_FACETS = frozenset({
     "timing_age", "comparison", "recommendation", "cause_reason", "method_how",
     "quantity", "dosage", "indication", "complication", "prognosis",
+    "prevalence", "frequency", "epidemiology", "diagnosis", "differential_diagnosis", "treatment",
+    "contraindication", "recurrence", "follow_up", "salary", "cost", "career", "regulation",
 })
-_MULTI_SOURCE_FACETS = frozenset({"comparison", "recommendation"})
+_MULTI_SOURCE_FACETS = frozenset({"comparison", "recommendation", "prevalence", "frequency", "epidemiology", "salary", "cost"})
 _FRAGMENTED_FACETS = frozenset({"timing_age", "timing", "cause_reason", "method_how", "quantity", "dosage"})
 _DIGIT_RE = re.compile(r"\d")
 

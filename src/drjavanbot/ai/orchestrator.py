@@ -59,7 +59,7 @@ from .reasoning_prompts import (
 )
 from .retrieval import RETRIEVAL_SEMANTICS_VERSION, assess_planned_retrieval, retrieve_with_plan
 from .telemetry import TelemetryStore
-from .validation import CitationValidationError, ModelOutputError
+from .validation import CitationValidationError, ModelOutputError, OutputTruncatedError
 
 
 # One hard application-level semantic-call ceiling. Provider-internal transport
@@ -110,7 +110,7 @@ class ArchiveAnswerService:
         self.planner_cache = planner_cache
         self.telemetry = telemetry
 
-    def answer(self, question: str, progress: ProgressCallback | None = None) -> AnswerResult:
+    def answer(self, question: str, progress: ProgressCallback | None = None, *, precomputed_plan: SearchPlan | None = None) -> AnswerResult:
         question = question.strip()
         normalized = normalize_text(question)
         if not normalized:
@@ -137,9 +137,11 @@ class ArchiveAnswerService:
         ai_calls = 0
         refinement_used = False
         planner_key = _planner_cache_key(normalized, index_version, self.config)
-        plan = self.planner_cache.get(planner_key, question=question) if self.planner_cache is not None else None
+        plan = precomputed_plan
+        if plan is None and self.planner_cache is not None:
+            plan = self.planner_cache.get(planner_key, question=question)
 
-        # STATE: PLAN
+        # STATE: PLAN. Intelligence-v2 may provide a validated pre-search plan.
         if plan is None:
             _emit_progress(progress, "planning", cached=False)
             ai_calls += 1
@@ -558,6 +560,8 @@ class ArchiveAnswerService:
             )
             if not isinstance(result.content, str) or not result.content.strip():
                 raise ModelOutputError("empty model content")
+            if str(result.finish_reason or "").casefold() in {"length", "max_tokens", "token_limit"}:
+                raise OutputTruncatedError("provider output was truncated")
             processed = processor(result.content)
         except Exception as exc:
             if self.telemetry is not None:
@@ -569,6 +573,7 @@ class ArchiveAnswerService:
                     reason_code=reason_code,
                     logical_call=logical_call,
                     evidence_count=evidence_count,
+                    finish_reason=(result.finish_reason if result is not None else None),
                     model=(result.model if result is not None else self.config.model),
                     latency_ms=(
                         result.latency_ms
@@ -588,6 +593,7 @@ class ArchiveAnswerService:
                 reason_code=None,
                 logical_call=logical_call,
                 evidence_count=evidence_count,
+                finish_reason=result.finish_reason,
                 model=result.model or self.config.model,
                 latency_ms=result.latency_ms,
                 success=True,
@@ -751,6 +757,8 @@ def _repair_tokens(base: int, configured: int) -> int:
 def _failure_classification(exc: Exception) -> tuple[str, str]:
     if isinstance(exc, ProviderError):
         return "provider_failure", "provider_failed"
+    if isinstance(exc, OutputTruncatedError):
+        return "structured_output_failure", "output_truncated"
     if isinstance(exc, ModelOutputError):
         return "structured_output_failure", "structured_output_failed"
     if isinstance(exc, CitationValidationError):

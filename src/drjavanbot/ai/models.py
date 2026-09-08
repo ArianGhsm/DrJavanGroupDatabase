@@ -22,6 +22,7 @@ class ProviderResult:
     usage: UsageMetrics
     latency_ms: float
     request_id: str | None = None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

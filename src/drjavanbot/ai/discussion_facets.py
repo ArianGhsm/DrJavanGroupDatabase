@@ -161,11 +161,34 @@ def _mark_topic_anchors(
         for value in (*topic_values, *plan.aliases)
         if normalize_text(value)
     )
+    raw_groups = tuple(getattr(plan, "topic_anchor_groups", ()) or ())
+    groups = tuple(
+        tuple(normalize_text(value) for value in group if normalize_text(value))
+        for group in raw_groups
+        if group
+    )
+    groups = tuple(group for group in groups if group)
     for state in states:
         direct = normalize_text(state.candidate.message.text_normalized or state.candidate.message.text_raw)
+        contextual = " ".join(
+            normalize_text(item.text_normalized or item.text_raw)
+            for item in tuple(getattr(state.candidate, "context", ()) or ())[:8]
+            if normalize_text(item.text_normalized or item.text_raw)
+        )
+        topic_surface = " ".join(value for value in (direct, contextual) if value)
         canonical_qualified = bool(state.qualified_families & anchor_families)
-        direct_core = any(_concept_in_text(concept, direct) for concept in concepts)
-        state.topic_anchor = canonical_qualified or direct_core
+        if groups:
+            # Mandatory semantic topic groups are AND constraints; aliases inside
+            # each group are OR alternatives. A partial OR hit or a generic facet
+            # term can never manufacture topic identity. Reply-parent/context may
+            # supply the topic for a short answer such as an age or dose.
+            direct_core = all(any(_concept_in_text(term, topic_surface) for term in group) for group in groups)
+            state.topic_anchor = direct_core
+        else:
+            # Legacy/manual plans may encode aliases as a flat list. Preserve their
+            # compatibility semantics; Intelligence-v2 plans always carry groups.
+            direct_core = any(_concept_in_text(concept, direct) for concept in concepts)
+            state.topic_anchor = canonical_qualified or direct_core
 
 
 def _concept_in_text(concept: str, text: str) -> bool:

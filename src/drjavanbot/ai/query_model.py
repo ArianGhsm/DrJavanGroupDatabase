@@ -30,6 +30,36 @@ class AnswerFacet(StrEnum):
     COMPLICATION = "complication"
     PROGNOSIS = "prognosis"
     STAGE = "stage"
+    DEFINITION = "definition"
+    CLASSIFICATION = "classification"
+    PREVALENCE = "prevalence"
+    FREQUENCY = "frequency"
+    EPIDEMIOLOGY = "epidemiology"
+    AGE = "age"
+    SEX = "sex"
+    LOCATION = "location"
+    DISTRIBUTION = "distribution"
+    ETIOLOGY = "etiology"
+    RISK_FACTOR = "risk_factor"
+    SIGNS = "signs"
+    SYMPTOMS = "symptoms"
+    DIAGNOSIS = "diagnosis"
+    DIFFERENTIAL_DIAGNOSIS = "differential_diagnosis"
+    RADIOGRAPHIC_FEATURES = "radiographic_features"
+    HISTOPATHOLOGY = "histopathology"
+    CONTRAINDICATION = "contraindication"
+    TREATMENT = "treatment"
+    DURATION = "duration"
+    RECURRENCE = "recurrence"
+    FOLLOW_UP = "follow_up"
+    MATERIAL = "material"
+    PRODUCT = "product"
+    COST = "cost"
+    SALARY = "salary"
+    CAREER = "career"
+    REGULATION = "regulation"
+    GUIDELINE = "guideline"
+    CLINICAL_DECISION = "clinical_decision"
 
 
 class EvidencePattern(StrEnum):
@@ -160,6 +190,7 @@ class SearchPlan:
     schema_version: str = QUERY_MODEL_VERSION
     normalized_intent: str = ""
     topic_anchors: tuple[str, ...] = ()
+    topic_anchor_groups: tuple[tuple[str, ...], ...] = ()
     answer_facets: tuple[str, ...] = ()
     population_constraints: tuple[str, ...] = ()
     condition_constraints: tuple[str, ...] = ()
@@ -265,6 +296,7 @@ class SearchPlan:
             "intent": self.intent,
             "normalized_intent": self.normalized_intent or self.intent,
             "topic_anchors": list((self.topic_anchors or self.core_concepts)[:8]),
+            "topic_anchor_groups": [list(group) for group in self.topic_anchor_groups[:6]],
             "required_aspects": list(self.required_aspects[:10]),
             "answer_facets": list(self.answer_facets[:10]),
             "query_families": [family.to_dict() for family in self.query_families[:MAX_FINAL_FAMILIES]],
@@ -291,6 +323,7 @@ class SearchPlan:
             "schema_version": self.schema_version,
             "normalized_intent": self.normalized_intent or self.intent,
             "topic_anchors": list(self.topic_anchors),
+            "topic_anchor_groups": [list(group) for group in self.topic_anchor_groups],
             "answer_facets": list(self.answer_facets),
             "population_constraints": list(self.population_constraints),
             "condition_constraints": list(self.condition_constraints),

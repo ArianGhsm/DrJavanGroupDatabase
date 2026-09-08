@@ -13,6 +13,13 @@ from drjavanbot.ai.provider import AuthenticationError
 from drjavanbot.ai.provider_v4 import DeepSeekV4AvalAIClient
 from drjavanbot.ai.telemetry import TelemetryStore
 from drjavanbot.search import SQLiteSearchBackend
+from drjavanbot.intelligence.archive_provider import archive_plan_from_request
+from drjavanbot.intelligence.core import DentalIntelligenceCore
+from drjavanbot.intelligence.model_policy import ModelPolicy
+from drjavanbot.intelligence.models import SourceType
+from drjavanbot.intelligence.planning import QuestionIntelligenceEngine
+from drjavanbot.intelligence.provider import AvalAIIntelligenceProvider
+from drjavanbot.intelligence.runtime import required_non_archive_sources, stage1_source_pending_answer
 from drjavanbot.secrets import AVALAI_API_KEY_SECRET,LocalFileSecretStore
 from drjavanbot.storage import database_health,full_reindex
 from .config import ALLOWED_MODELS
@@ -45,13 +52,32 @@ class RuntimeServices:
     def answer_with_progress(self,question,progress): return self._answer(question,progress=progress)
     def _answer(self,question,progress=None):
         if not self.db_path.exists(): raise IndexNotReadyError("index database does not exist")
-        backend=SQLiteSearchBackend(self.db_path); config=self._ai_config(); service=ArchiveAnswerService(backend=backend,secret_store=self.secret_store,config=config,provider=DeepSeekV4AvalAIClient(config),cache=self.cache,planner_cache=self.planner_cache,telemetry=self.telemetry)
-        try: result=service.answer(question,progress=progress)
+        backend=SQLiteSearchBackend(self.db_path); config=self._ai_config(); precomputed_plan=None; intelligence_calls=0
+        if config.intelligence_v2 or config.source_router_v2:
+            intelligence_plan=self._intelligence_plan(question,config)
+            intelligence_calls=0 if intelligence_plan.planner_fallback_used else 1
+            if config.source_router_v2 and required_non_archive_sources(intelligence_plan.route):
+                return stage1_source_pending_answer(intelligence_plan.route,ai_calls=intelligence_calls)
+            if config.intelligence_v2:
+                archive_request=next((item for item in intelligence_plan.retrieval_requests if item.source_type == SourceType.ARCHIVE),None)
+                if archive_request is not None:
+                    precomputed_plan=archive_plan_from_request(archive_request)
+        service=ArchiveAnswerService(backend=backend,secret_store=self.secret_store,config=config,provider=DeepSeekV4AvalAIClient(config),cache=self.cache,planner_cache=self.planner_cache,telemetry=self.telemetry)
+        try: result=service.answer(question,progress=progress,precomputed_plan=precomputed_plan)
         except AuthenticationError: self.state.set_provider_auth_failed(True); raise
         except sqlite3.OperationalError as exc:
             if "locked" in str(exc).casefold() or "busy" in str(exc).casefold(): raise IndexNotReadyError("archive index is temporarily busy") from exc
             raise
-        self.state.set_provider_auth_failed(False); return result
+        self.state.set_provider_auth_failed(False)
+        return result.with_runtime(ai_calls=result.ai_calls+intelligence_calls) if intelligence_calls else result
+    def _intelligence_plan(self,question,config):
+        provider=None
+        if config.intelligence_v2:
+            api_key=self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
+            if api_key:
+                provider=AvalAIIntelligenceProvider(api_key=api_key,base_config=config,telemetry=self.telemetry)
+        engine=QuestionIntelligenceEngine(provider=provider,model_policy=ModelPolicy.from_env(default_model=self.model()))
+        return DentalIntelligenceCore(question_engine=engine).plan(question)
     def source_details(self,message_ids,source_refs):
         if not self.db_path.exists(): return []
         backend=SQLiteSearchBackend(self.db_path); out=[]; seen=set()

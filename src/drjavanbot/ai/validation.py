@@ -15,6 +15,10 @@ class CitationValidationError(ModelOutputError):
     pass
 
 
+class OutputTruncatedError(ModelOutputError):
+    pass
+
+
 _ALLOWED_CLAIM_KINDS = {"answer", "finding", "disagreement", "conclusion"}
 _MAX_CLAIMS = 10
 _MAX_SUPPORTS_PER_CLAIM = 4

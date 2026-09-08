@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from drjavanbot.normalization import normalize_text
 from drjavanbot.search.terms import informative_query, informative_tokens
+from drjavanbot.intelligence.concepts import DentalConceptResolver, concept_variant_groups
 from .query_model import (
     QUERY_MODEL_VERSION,
     MAX_FINAL_FAMILIES,
@@ -31,6 +32,10 @@ PLANNER_VERSION = f"semantic-search-plan-v3-{QUERY_MODEL_VERSION}"
 _MAX_MODEL_FAMILIES = 8
 _MAX_PARSED_INITIAL_QUERIES = MAX_INITIAL_FAMILIES * MAX_QUERIES_PER_FAMILY
 _REPEAT_RE = re.compile(r"(.)\1{2,}")
+_GENERIC_TOPIC_QUALIFIERS = frozenset(
+    normalize_text(value)
+    for value in ("برند", "مارک", "محصول", "brand", "product", "متریال", "material")
+)
 
 
 def parse_search_plan(content: str, *, question: str) -> SearchPlan:
@@ -55,6 +60,7 @@ def deterministic_fallback_plan(question: str) -> SearchPlan:
     searchable = bool(topical)
     facets = infer_question_facets(question)
     topic_anchors = _deterministic_topic_anchors(question, facets)
+    topic_anchor_groups = _deterministic_topic_anchor_groups(question, facets)
     typo_hints = _mechanical_typo_hints(question)
 
     families: list[SearchFamily] = []
@@ -82,6 +88,9 @@ def deterministic_fallback_plan(question: str) -> SearchPlan:
     required = _required_aspects(searchable, facets)
     intent = _intent_from_facets(facets, searchable=searchable)
 
+    if searchable and not topic_anchor_groups:
+        topic_anchor_groups = _deterministic_topic_anchor_groups(question, facets)
+
     return SearchPlan(
         searchable=searchable,
         intent=intent,
@@ -98,6 +107,7 @@ def deterministic_fallback_plan(question: str) -> SearchPlan:
         schema_version=QUERY_MODEL_VERSION,
         normalized_intent=intent,
         topic_anchors=topic_anchors,
+        topic_anchor_groups=topic_anchor_groups,
         answer_facets=facets,
         population_constraints=("pediatric_population",) if "pediatric_population" in facets else (),
         comparison_targets=comparison_targets(question),
@@ -120,6 +130,8 @@ def plan_requires_deep_retrieval(plan: SearchPlan) -> bool:
     demanding = {
         "timing_age", "comparison", "recommendation", "cause_reason", "method_how",
         "quantity", "dosage", "indication", "complication", "prognosis",
+        "prevalence", "frequency", "epidemiology", "diagnosis", "differential_diagnosis",
+        "treatment", "contraindication", "recurrence", "follow_up", "salary", "cost", "career", "regulation",
     }
     return bool(set(plan.required_aspects) & demanding)
 
@@ -169,6 +181,7 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
         max_len=80,
         question=question,
     ) or topic_anchors
+    topic_anchor_groups = _parse_topic_anchor_groups(payload.get("topic_anchor_groups"), question=question)
     aliases = _string_tuple(
         hints.get("aliases", payload.get("aliases")),
         max_items=14,
@@ -300,6 +313,8 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
             core = fallback.core_concepts
         if not topic_anchors:
             topic_anchors = fallback.topic_anchors
+        if not topic_anchor_groups:
+            topic_anchor_groups = fallback.topic_anchor_groups
     if searchable and not families:
         searchable = False
 
@@ -321,6 +336,9 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
         minimum_family_coverage=policy.minimum_family_coverage,
     ).bounded()
 
+    if searchable and not topic_anchor_groups:
+        topic_anchor_groups = _deterministic_topic_anchor_groups(question, facets)
+
     return SearchPlan(
         searchable=searchable,
         intent=intent,
@@ -337,6 +355,7 @@ def plan_from_payload(payload: dict[str, Any], *, question: str) -> SearchPlan:
         schema_version=QUERY_MODEL_VERSION,
         normalized_intent=normalized_intent,
         topic_anchors=topic_anchors,
+        topic_anchor_groups=topic_anchor_groups,
         answer_facets=facets,
         population_constraints=population or (("pediatric_population",) if "pediatric_population" in facets else ()),
         condition_constraints=condition,
@@ -509,11 +528,52 @@ def _deterministic_topic_anchors(question: str, facets: Iterable[str]) -> tuple[
             facet_tokens.update(informative_tokens(value))
     if "pediatric_population" in set(facets):
         facet_tokens.update(informative_tokens("بچه بچه ها کودک کودکان اطفال نوجوان child children pediatric adolescent"))
-    anchors = [token for token in tokens if token not in facet_tokens]
+    anchors = [
+        token for token in tokens
+        if token not in facet_tokens and normalize_text(token) not in _GENERIC_TOPIC_QUALIFIERS
+    ]
     if not anchors:
         anchors = tokens
     return tuple(anchors[:6])
 
+
+def _deterministic_topic_anchor_groups(question: str, facets: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+    """Build mandatory topic identity from user language, never model-invented hints.
+
+    Resolved terminology forms one OR group per concept. Remaining deterministic
+    topic tokens become singleton AND groups after facet/filler removal. This
+    prevents a model-provided full-question anchor from making intent words such
+    as timing or recommendation mandatory topic evidence.
+    """
+    try:
+        resolved = DentalConceptResolver.load_default().resolve(question)
+    except Exception:
+        resolved = ()
+    groups = list(concept_variant_groups(resolved))
+    covered = {term for group in groups for term in group}
+    anchors = _deterministic_topic_anchors(question, facets)
+    for anchor in anchors:
+        normalized = normalize_text(anchor)
+        if normalized and not any(normalized == term or normalized in term or term in normalized for term in covered):
+            groups.append((normalized,))
+    return tuple(group for group in groups if group)[:6]
+
+
+def _parse_topic_anchor_groups(value: Any, *, question: str) -> tuple[tuple[str, ...], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ModelOutputError("search planner topic_anchor_groups must be a list")
+    out: list[tuple[str, ...]] = []
+    for raw_group in value[:6]:
+        if isinstance(raw_group, str):
+            raw_group = [raw_group]
+        if not isinstance(raw_group, (list, tuple)):
+            continue
+        group = _string_tuple(raw_group, max_items=8, max_len=80, question=question)
+        if group:
+            out.append(group)
+    return tuple(out)
 
 def _deterministic_intersections(
     topic_anchors: Iterable[str],
@@ -608,7 +668,9 @@ def _intent_from_facets(facets: Iterable[str], *, searchable: bool) -> str:
         return "non_searchable"
     ordered = tuple(facets)
     for value in (
-        "comparison", "recommendation", "cause_reason", "method_how", "timing_age",
+        "prevalence", "frequency", "epidemiology", "salary", "cost", "career", "regulation",
+        "comparison", "recommendation", "differential_diagnosis", "diagnosis", "treatment",
+        "contraindication", "recurrence", "follow_up", "cause_reason", "method_how", "timing_age",
         "dosage", "quantity", "indication", "complication", "prognosis", "timing",
     ):
         if value in ordered:

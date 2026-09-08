@@ -31,3 +31,7 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+
+# Versioned package terminology data (runtime data/ remains ignored above).
+!src/drjavanbot/data/
+!src/drjavanbot/data/*.json

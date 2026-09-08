@@ -115,11 +115,12 @@ class AvalAIClient:
         usage = _extract_usage(parsed)
         model = str(parsed.get("model") or self.config.model)
         request_id = _header(response.headers, "x-request-id") or _optional_string(parsed.get("id"))
+        finish_reason = _extract_finish_reason(parsed)
         _LOG.info(
             "avalai_call request_type=%s model=%s success=true input_tokens=%d cached_input_tokens=%d output_tokens=%d latency_ms=%.1f",
             request_type, model, usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, latency_ms,
         )
-        return ProviderResult(content=content, model=model, usage=usage, latency_ms=latency_ms, request_id=request_id)
+        return ProviderResult(content=content, model=model, usage=usage, latency_ms=latency_ms, request_id=request_id, finish_reason=finish_reason)
 
     def validate_api_key(self, api_key: str) -> bool:
         """Validate auth via the low-cost /models endpoint; never persists the candidate key."""
@@ -213,6 +214,14 @@ def _extract_content(payload: dict) -> str:
         if parts:
             return "".join(parts)
     raise ProviderResponseError("AvalAI message content is not text")
+
+
+def _extract_finish_reason(payload: dict) -> str | None:
+    try:
+        value = payload["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+    return _optional_string(value)
 
 
 def _extract_usage(payload: dict) -> UsageMetrics:
