@@ -5,34 +5,53 @@ from typing import Sequence
 
 from .reasoning import AnswerabilityAssessment, assess_answerability
 
-INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v2"
+INTEGRATION_POLICY_VERSION = "brain-v2-integration-policy-v3"
 
 _COMPLETE_STATES = {"facet_complete_discussion", "strong_direct_answer_candidate"}
 _RESCUE_STATES = {"only_topical_facet_missing", "generic_noisy_coverage", "no_candidates"}
 
 
+def _candidate_author_count(report) -> int:
+    return len({
+        candidate.message.author_normalized or candidate.message.author
+        for candidate in tuple(getattr(report, "candidates", ()) or ())[:16]
+        if candidate.message.author_normalized or candidate.message.author
+    })
+
+
 def should_refine_retrieval(plan, report, *, legacy_needs_refinement: bool, legacy_reason: str) -> tuple[bool, str]:
-    """Reconcile typed planner depth with discussion-retrieval quality."""
+    """Reconcile typed planner depth/evidence shape with retrieval quality."""
     policy = getattr(plan, "retrieval_policy", None)
     rescue_allowed = bool(getattr(policy, "rescue_allowed", True))
     if not rescue_allowed:
         return False, "planner_rescue_disabled"
 
     quality = str(getattr(report, "quality_state", "") or "")
-    stop_when_complete = bool(getattr(policy, "stop_when_required_facets_covered", True))
-    if quality in _COMPLETE_STATES and stop_when_complete:
-        return False, quality
+    depth = str(getattr(policy, "depth", "standard") or "standard")
+    expected = str(getattr(policy, "expected_evidence_pattern", "single_message") or "single_message")
+    candidates = tuple(getattr(report, "candidates", ()) or ())
+    author_count = _candidate_author_count(report)
+    discussion_count = int(getattr(report, "discussion_count", 0) or 0)
+
     if quality in _RESCUE_STATES:
         return True, quality
 
-    depth = str(getattr(policy, "depth", "standard") or "standard")
+    stop_when_complete = bool(getattr(policy, "stop_when_required_facets_covered", True))
+    if quality in _COMPLETE_STATES and stop_when_complete:
+        # A recommendation/comparison planner explicitly asks for multi-source
+        # evidence. One locally complete discussion with only two voices is still
+        # worth one bounded retrieval rescue; a diverse result is not.
+        if expected == "multi_source" and (author_count < 3 or discussion_count < 2):
+            return True, "multi_source_diversity_rescue"
+        return False, quality
+
     if depth == "direct":
-        # Direct lookup asks the archive for a topic/entity itself. Once topical
-        # candidates exist, a semantic query-refinement call is usually pure cost;
-        # extraction/validation can still conclude true insufficiency safely.
-        if tuple(getattr(report, "candidates", ()) or ()):
-            return False, "direct_policy_candidate_coverage"
-        return True, "direct_policy_no_candidates"
+        # Direct lookup should not buy an AI refinement once local retrieval is
+        # already adequately diverse. Sparse two-hit fallbacks retain one rescue
+        # opportunity, which is useful for malformed-planner recovery.
+        if len(candidates) >= 3 and author_count >= 2:
+            return False, "direct_policy_diverse_coverage"
+        return bool(legacy_needs_refinement), str(legacy_reason)
 
     if depth == "deep":
         total = int(getattr(report, "required_facet_groups_total", 0) or 0)
@@ -52,12 +71,7 @@ def bounded_refinement_families(plan, families: Sequence) -> tuple:
 
 
 def assess_integrated_answerability(pack, plan, report) -> AnswerabilityAssessment:
-    """Prefer discussion-level co-location signals, retain legacy fallback.
-
-    This decides whether extraction deserves a chance; it never creates facts.
-    Every displayed claim is still exact-support validated and, when needed,
-    semantically verified against only its admitted archive quotes.
-    """
+    """Prefer discussion-level co-location signals, retain legacy fallback."""
     base = assess_answerability(pack, plan, report)
     if not pack.messages:
         return base
