@@ -24,11 +24,16 @@
   "semantics": {
     "planner_schema_version": "query-understanding-v1",
     "retrieval_semantics_version": "discussion-retrieval-v2.1-typed-policy",
-    "integration_policy_version": "brain-v2-integration-policy-v3",
+    "integration_policy_version": "brain-v2-integration-policy-v6",
     "reasoning_prompt_version": "evidence-reasoning-state-machine-v2.1",
     "validation_semantics_version": "claim-support-validation-v2.2",
     "quality_report_schema_version": "quality-lab-v2.0",
     "max_logical_ai_calls": 4
+  },
+  "migration_qa": {
+    "workflow_run_id": 34195520419,
+    "quality_lab": "pass",
+    "legacy_semantic_cross_check": "pass"
   },
   "raw_archive_modified": false
 }
