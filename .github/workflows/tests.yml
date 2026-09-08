@@ -49,6 +49,12 @@ jobs:
             --top-k 12 \
             --base-sha 4226f2c30a04d89a28afe8284be5c3e5f657a2a6 \
             --json-out quality-lab-report.json
+      - name: Legacy semantic benchmark integration cross-check
+        if: github.event_name == 'pull_request' && github.head_ref == 'integration/brain-v2'
+        run: |
+          drjavanbot --archive-dir "گروه دکتر جوان" semantic-benchmark \
+            --strict \
+            --top-k 12
       - name: Upload PII-safe Quality Lab report
         if: always()
         uses: actions/upload-artifact@v4
