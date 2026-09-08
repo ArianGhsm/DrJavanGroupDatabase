@@ -28,24 +28,27 @@ class FakeServices:
     def update_status(self): return UpdateStatus(state="idle")
 
 
-def test_owner_start_has_direct_panel_button():
+def test_owner_start_has_direct_control_center_destinations():
     api=FakeAPI()
     app=TelegramBotApp(api=api,owner_id=42,services=FakeServices(),state=FakeState(),config=TelegramConfig())
     app._handle_command(42,42,True,"/start")
     assert api.sent
     keyboard=api.sent[-1][2]["reply_markup"]["inline_keyboard"]
     callbacks={button["callback_data"] for row in keyboard for button in row}
-    assert "settings" in callbacks
-    assert "software_update" in callbacks
-    assert "پاسخ‌ها فقط از پیام‌های آرشیو گروه" in str(api.sent[-1][1])
+    assert callbacks == {"adm:update","adm:health","adm:ai","adm:archive","adm:access","adm:tools"}
+    text=str(api.sent[-1][1])
+    assert "مرکز مدیریت" in text
+    assert "به‌روزرسانی" in text
+    assert "ایندکس" in text
 
 
-def test_panel_alias_opens_owner_settings():
+def test_panel_alias_opens_owner_control_center():
     api=FakeAPI()
     app=TelegramBotApp(api=api,owner_id=42,services=FakeServices(),state=FakeState(),config=TelegramConfig())
     app._handle_command(42,42,True,"/panel")
-    assert "پنل مالک" in str(api.sent[-1][1])
-    assert "پاسخ کاربران فقط از شواهد آرشیو گروه" in str(api.sent[-1][1])
+    text=str(api.sent[-1][1])
+    assert "مرکز مدیریت" in text
+    assert "وضعیت کلی" in text
 
 
 def test_runtime_registers_owner_scoped_command_menu_without_affecting_startup():
@@ -62,4 +65,7 @@ def test_runtime_registers_owner_scoped_command_menu_without_affecting_startup()
     assert public_kwargs=={}
     assert owner_kwargs["scope"]=={"type":"chat","chat_id":42}
     owner_commands={item["command"] for item in owner}
-    assert {"panel","settings","update","errors"}.issubset(owner_commands)
+    assert {"panel","update","errors","health"}.issubset(owner_commands)
+    owner_descriptions=" ".join(item["description"] for item in owner)
+    assert "به‌روزرسانی نرم‌افزار" in owner_descriptions
+    assert "سلامت سیستم" in owner_descriptions
