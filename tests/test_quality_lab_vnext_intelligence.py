@@ -5,13 +5,18 @@ from drjavanbot.intelligence.routing import route_sources
 from drjavanbot.intelligence.understanding import understand_question
 
 
-def test_quality_lab_vnext_has_at_least_60_diverse_questions():
+def test_quality_lab_vnext_has_at_least_100_diverse_questions():
     cases = vnext_cases()
-    assert len(cases) >= 60
+    assert len(cases) >= 100
     disciplines = {case.discipline for case in cases}
     assert len(disciplines) >= 15
     assert {"Career/Economics", "Regulation", "Current Market", "Oral Pathology", "Endodontics"}.issubset(disciplines)
     assert len({case.case_id for case in cases}) == len(cases)
+    assert set("ABCDEFGHIJ").issubset({case.category for case in cases})
+    assert sum(case.discipline == "Oral Pathology" for case in cases) >= 10
+    assert sum("prevalence" in case.expected_facets for case in cases) >= 8
+    assert sum(any(f in {"salary", "cost", "career", "regulation"} for f in case.expected_facets) for case in cases) >= 12
+    assert all(case.gold_authority for case in cases)
 
 
 def test_quality_lab_vnext_question_understanding_and_source_routing_contracts():

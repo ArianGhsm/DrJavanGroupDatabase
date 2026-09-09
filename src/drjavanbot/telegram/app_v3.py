@@ -49,7 +49,11 @@ class TelegramBotApp(OwnerTelegramBotApp):
         try:
             progressive = getattr(self.services, "answer_with_progress", None)
             if callable(progressive):
-                answer = progressive(question, reporter.on_event)
+                try:
+                    answer = progressive(question, reporter.on_event, user_id=user_id)
+                except TypeError as exc:
+                    if "user_id" not in str(exc): raise
+                    answer = progressive(question, reporter.on_event)
             else:
                 # Compatibility with test/custom service implementations. Runtime
                 # services always provide the progressive capability.
@@ -67,7 +71,10 @@ class TelegramBotApp(OwnerTelegramBotApp):
             for idx, chunk in enumerate(chunks):
                 markup = None
                 if idx == len(chunks) - 1 and (answer.cited_message_ids or answer.source_refs):
-                    items = self.services.source_details(answer.cited_message_ids, answer.source_refs)
+                    try:
+                        items = self.services.source_details(answer.cited_message_ids, answer.source_refs, getattr(answer, "external_sources", ()))
+                    except TypeError:
+                        items = self.services.source_details(answer.cited_message_ids, answer.source_refs)
                     if items:
                         sid = self.state.create_source_session(
                             user_id,

@@ -12,7 +12,7 @@ def test_source_router_covers_archive_science_current_and_hybrid_contracts():
     assert archive.required_sources == (SourceType.ARCHIVE,)
 
     science = route_sources(understand_question("شایع ترین کیست ادنتوژنیک چیست؟"))
-    assert science.selected_sources[0].source_type == SourceType.DENTAL_KNOWLEDGE
+    assert science.selected_sources[0].source_type == SourceType.SCIENTIFIC
     assert SourceType.SCIENTIFIC in science.fallback_order
     assert SourceType.ARCHIVE in science.fallback_order
 
@@ -23,7 +23,7 @@ def test_source_router_covers_archive_science_current_and_hybrid_contracts():
     hybrid = route_sources(understand_question("نظر گروه درباره کامپوزیت رو با evidence علمی مقایسه کن"))
     types = [item.source_type for item in hybrid.selected_sources]
     assert types[0] == SourceType.ARCHIVE
-    assert SourceType.DENTAL_KNOWLEDGE in types and SourceType.SCIENTIFIC in types
+    assert SourceType.SCIENTIFIC in types and SourceType.SCIENTIFIC in types
 
 
 def test_retrieval_requests_are_source_neutral_and_future_adapters_fail_explicitly():
@@ -58,3 +58,14 @@ def test_stage1_runtime_fails_closed_when_required_external_source_is_unavailabl
     assert answer.insufficient_evidence
     assert not answer.cited_message_ids
     assert answer.ai_calls == 1
+
+
+def test_terse_dental_topic_uses_fast_archive_path_but_explicit_fact_remains_scientific():
+    terse=route_sources(understand_question("RCT؟"))
+    assert terse.required_sources == (SourceType.ARCHIVE,)
+    assert terse.selected_sources[0].rationale_code == "terse_dental_archive_lookup"
+    emax=understand_question("e.max")
+    assert emax.domain == "dentistry"
+    assert route_sources(emax).required_sources == (SourceType.ARCHIVE,)
+    factual=route_sources(understand_question("تعریف RCT چیست؟"))
+    assert factual.required_sources == (SourceType.SCIENTIFIC,)

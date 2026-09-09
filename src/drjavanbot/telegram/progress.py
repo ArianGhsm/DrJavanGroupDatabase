@@ -11,6 +11,9 @@ from .rendering import RichScreen, html_escape, rich_text
 _STAGE_STEP = {
     "accepted": 0,
     "planning": 1,
+    "source_routing": 1,
+    "source_retrieval": 2,
+    "evidence_fusion": 3,
     "searching": 2,
     "refining": 2,
     "context": 3,
@@ -23,10 +26,10 @@ _STAGE_STEP = {
     "done": 5,
 }
 _STEPS = (
-    "فهم سؤال",
-    "جست‌وجوی آرشیو",
-    "بررسی گفت‌وگوهای مرتبط",
-    "جمع‌بندی و اعتبارسنجی شواهد",
+    "فهم سؤال و انتخاب منبع",
+    "بررسی منابع",
+    "تحلیل و ادغام شواهد",
+    "جمع‌بندی و اعتبارسنجی",
 )
 _HEARTBEAT_SECONDS = 5.0
 
@@ -161,13 +164,13 @@ def _progress_screen(stage: str, details: Mapping[str, object], *, elapsed: floa
     seconds = int(max(0.0, elapsed))
     time_label = f"{seconds} ثانیه" if seconds else "شروع"
     rich = (
-        "<h3>🔎 در حال بررسی آرشیو گروه</h3>"
+        "<h3>🔎 در حال بررسی سؤال و منابع</h3>"
         "<ul>" + "".join(rows) + "</ul>"
         f"<blockquote>{html_escape(detail)}</blockquote>"
         f"<footer>زمان سپری‌شده: {html_escape(time_label)} — این فقط وضعیت واقعی pipeline است، نه chain-of-thought داخلی مدل.</footer>"
     )
     fallback = (
-        "🔎 <b>در حال بررسی آرشیو گروه</b>\n\n"
+        "🔎 <b>در حال بررسی سؤال و منابع</b>\n\n"
         + "\n".join(fallback_rows)
         + f"\n\n<i>{html_escape(detail)}</i>"
         + f"\n\n<code>{html_escape(time_label)}</code>"
@@ -182,6 +185,16 @@ def _stage_detail(stage: str, details: Mapping[str, object]) -> str:
         if bool(details.get("cached")):
             return "برنامه جست‌وجوی معتبر قبلی پیدا شد؛ آماده جست‌وجوی آرشیو است."
         return "در حال تبدیل سؤال به مسیرهای محدود جست‌وجو؛ این مرحله پاسخ تولید نمی‌کند."
+    if stage == "source_routing":
+        sources = _int(details.get("sources")); required = _int(details.get("required"))
+        return f"مسیر منبع تعیین شد: {sources} منبع در نظر گرفته شده و {required} منبع الزامی است."
+    if stage == "source_retrieval":
+        sources = _int(details.get("sources"))
+        return f"{sources or 1} منبع مستقل در حال بررسی است؛ جست‌وجوهای مستقل تا حد امکان موازی اجرا می‌شوند."
+    if stage == "evidence_fusion":
+        count = _int(details.get("evidence_count")); unavailable = _int(details.get("unavailable_count"))
+        suffix = f"؛ {unavailable} منبع در دسترس نبود" if unavailable else ""
+        return f"{count} قطعه شواهد وارد مرحله رتبه‌بندی topic/requested-fact شده{suffix}."
     if stage == "searching":
         queries = _int(details.get("query_count"))
         families = _int(details.get("family_count"))
@@ -205,9 +218,9 @@ def _stage_detail(stage: str, details: Mapping[str, object]) -> str:
     if stage == "synthesizing":
         messages = _int(details.get("evidence_messages"))
         authors = _int(details.get("evidence_authors"))
-        return f"{messages} پیام از {authors} نویسنده وارد بسته شواهد شده؛ جمع‌بندی فقط از همین پیام‌ها ساخته می‌شود."
+        return f"{messages} قطعه شواهد از {authors} منبع مستقل وارد بسته پاسخ شده؛ جمع‌بندی فقط از همین شواهد ساخته می‌شود."
     if stage == "validating":
-        return "در حال تطبیق هر ادعا با message_id و نقل‌قول واقعی همان پیام گروه."
+        return "در حال تطبیق هر ادعا با evidence_id و عبارت واقعی منبع؛ ادعای بدون پشتوانه رد می‌شود."
     if stage == "repairing":
         return "قالب پاسخ AI معتبر نبود؛ یک تلاش اصلاحی محدود انجام می‌شود و grounding همچنان اجباری است."
     if stage == "cache_hit":
@@ -217,7 +230,7 @@ def _stage_detail(stage: str, details: Mapping[str, object]) -> str:
     if stage == "validation_failed":
         return "خروجی AI نتوانست از اعتبارسنجی سخت شواهد گروه عبور کند."
     if stage == "done":
-        return "پاسخ آماده شد و فقط شواهد تأییدشده گروه در آن مجاز است."
+        return "پاسخ آماده شد و فقط شواهد تأییدشده منابع انتخاب‌شده در آن مجاز است."
     return "پردازش ادامه دارد."
 
 

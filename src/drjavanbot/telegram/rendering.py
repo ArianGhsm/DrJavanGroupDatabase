@@ -48,7 +48,85 @@ def html_escape(value) -> str:
 
 
 def answer_rich_screen(answer) -> RichScreen:
-    """Make the group's archive—not the model—the visible authority of an answer."""
+    mode = str(getattr(answer, "source_mode", "archive") or "archive").casefold()
+    if mode == "archive":
+        return _archive_answer_rich_screen(answer)
+    return _multisource_answer_rich_screen(answer, mode)
+
+
+def _multisource_answer_rich_screen(answer, mode: str) -> RichScreen:
+    direct = (getattr(answer, "direct_answer", "") or "").strip()
+    insufficient = bool(getattr(answer, "insufficient_evidence", False))
+    titles = {"scientific": "📚 پاسخ علمی مستند", "current": "🌐 اطلاعات به‌روز", "hybrid": "🔀 پاسخ چندمنبعی"}
+    title = titles.get(mode, "🔀 پاسخ چندمنبعی")
+    if insufficient:
+        limitation = "; ".join(str(x) for x in (getattr(answer, "limitations", ()) or ()) if x)
+        rich = f"<h3>{title}</h3><blockquote>{html_escape(direct)}</blockquote>"
+        fallback = f"{title}\n\n{html_escape(direct)}"
+        if limitation:
+            rich += f"<footer>محدودیت: {html_escape(limitation)}</footer>"
+            fallback += f"\n\n⚠️ <i>{html_escape(limitation)}</i>"
+        return RichScreen(rich, fallback, f"{mode}_answer_insufficient")
+
+    claims = tuple(getattr(answer, "grounded_source_claims", ()) or ())
+    disagreements = tuple(getattr(answer, "disagreements", ()) or ())
+    limitations = tuple(getattr(answer, "limitations", ()) or ())
+    conclusion = getattr(answer, "practical_conclusion", None)
+    sources = tuple(getattr(answer, "external_sources", ()) or ())
+    confidence = str(getattr(answer, "confidence", "low") or "low").casefold()
+    reason = str(getattr(answer, "confidence_reason", "") or "").strip()
+
+    rich_parts = [f"<h3>{title}</h3>", f"<blockquote>{html_escape(direct)}</blockquote>"]
+    fallback_parts = [title, html_escape(direct)]
+
+    groups = {"scientific": [], "current": [], "archive": [], "other": []}
+    for claim in claims[1:]:
+        support_types = {str(getattr(support, "source_type", "")) for support in tuple(getattr(claim, "supports", ()) or ())}
+        if support_types & {"scientific", "dental_knowledge"}: group = "scientific"
+        elif support_types & {"current_web", "official"}: group = "current"
+        elif support_types == {"archive"} or "archive" in support_types: group = "archive"
+        else: group = "other"
+        groups[group].append(str(getattr(claim, "text", "") or ""))
+
+    labels = {"scientific": "📚 شواهد علمی", "current": "🌐 اطلاعات به‌روز", "archive": "🗂 در آرشیو گروه", "other": "📎 شواهد پشتیبان"}
+    for group in ("scientific", "current", "archive", "other"):
+        values = [value for value in groups[group] if value]
+        if not values: continue
+        rich_parts.append(f"<h3>{labels[group]}</h3><ul>" + "".join(f"<li>{html_escape(value)}</li>" for value in values) + "</ul>")
+        fallback_parts.append(f"<b>{labels[group]}</b>\n" + "\n".join(f"• {html_escape(value)}" for value in values))
+
+    if disagreements:
+        rich_parts.append("<h3>⚖️ اختلاف یا ناهمگونی شواهد</h3><ul>" + "".join(f"<li>{html_escape(value)}</li>" for value in disagreements) + "</ul>")
+        fallback_parts.append("<b>⚖️ اختلاف یا ناهمگونی شواهد</b>\n" + "\n".join(f"• {html_escape(value)}" for value in disagreements))
+    if conclusion:
+        rich_parts.append(f"<h3>جمع‌بندی عملی</h3><p>{html_escape(conclusion)}</p>")
+        fallback_parts.append(f"<b>جمع‌بندی عملی</b>\n{html_escape(conclusion)}")
+    if limitations:
+        rich_parts.append("<h3>⚠️ محدودیت</h3><ul>" + "".join(f"<li>{html_escape(value)}</li>" for value in limitations) + "</ul>")
+        fallback_parts.append("<b>⚠️ محدودیت</b>\n" + "\n".join(f"• {html_escape(value)}" for value in limitations))
+
+    if sources:
+        rich_parts.append("<h3>منابع</h3><ul>" + "".join(f"<li>{html_escape(_source_label(item))}</li>" for item in sources[:8]) + "</ul>")
+        fallback_parts.append("<b>منابع</b>\n" + "\n".join(f"• {html_escape(_source_label(item))}" for item in sources[:8]))
+    coverage = {"high":"زیاد", "medium":"متوسط", "low":"محدود"}.get(confidence, "محدود")
+    coverage_text = coverage + (f" — {reason}" if reason else "")
+    rich_parts.append(f"<footer>پوشش شواهد: {html_escape(coverage_text)}. دانش آزاد مدل به‌تنهایی مرجع factual نیست.</footer>")
+    fallback_parts.append(f"<i>پوشش شواهد: {html_escape(coverage_text)}. دانش آزاد مدل به‌تنهایی مرجع factual نیست.</i>")
+    return RichScreen("".join(rich_parts), "\n\n".join(fallback_parts), f"{mode}_answer")
+
+
+def _source_label(item) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    title = str(item.get("title") or item.get("source_name") or item.get("source_ref") or "منبع")
+    year = item.get("publication_year") or item.get("timestamp")
+    kind = str(item.get("source_type") or "")
+    suffix = f" — {year}" if year else ""
+    return f"{title}{suffix}" + (f" [{kind}]" if kind else "")
+
+
+def _archive_answer_rich_screen(answer) -> RichScreen:
+    """Render the archive-only compatibility mode."""
     direct = (getattr(answer, "direct_answer", "") or "").strip()
     insufficient = bool(getattr(answer, "insufficient_evidence", False))
     if insufficient:
@@ -73,10 +151,10 @@ def answer_rich_screen(answer) -> RichScreen:
     support_quotes = _grounded_support_quotes(answer)
 
     rich_parts = [
-        "<h3>📚 جمع‌بندی پیام‌های گروه</h3>",
+        "<h3>🗂 جمع‌بندی آرشیو گروه</h3>",
         f"<blockquote>{html_escape(direct)}</blockquote>",
     ]
-    fallback_parts = ["📚 <b>جمع‌بندی پیام‌های گروه</b>", html_escape(direct)]
+    fallback_parts = ["🗂 <b>جمع‌بندی آرشیو گروه</b>", html_escape(direct)]
     if findings:
         rich_parts.extend((
             "<h3>آنچه در گروه گفته شده</h3>",
@@ -204,18 +282,17 @@ def _sources_fallback(items, page, *, per_page=5):
     start = page * per_page
     lines = [f"<b>پیام‌های منبع</b> — صفحه {page + 1}/{total}"]
     for idx, item in enumerate(items[start:start + per_page], start=start + 1):
-        author = html_escape(_item_get(item, "author") or "نامشخص")
+        source_type = str(_item_get(item, "source_type") or "archive")
+        author = html_escape(_item_get(item, "author") or _item_get(item, "source_file") or "نامشخص")
         date = html_escape(_item_get(item, "datetime") or "تاریخ نامشخص")
         mid = _item_get(item, "message_id")
-        source = html_escape(_item_get(item, "source_file") or _item_get(item, "source_ref") or "")
+        source = html_escape(_item_get(item, "source_ref") or _item_get(item, "source_file") or "")
         excerpt = _item_get(item, "text") or _item_get(item, "text_excerpt") or ""
         excerpt_line = f"\n{html_escape(excerpt)}" if excerpt else ""
-        lines.append(
-            f"\n<b>{idx}.</b> {author}\n{date}"
-            + (f" — پیام #{mid}" if mid is not None else "")
-            + excerpt_line
-            + f"\n<code>{source}</code>"
-        )
+        title = _item_get(item, "title")
+        heading = html_escape(title) if title else author
+        label = "پیام گروه" if source_type == "archive" else source_type
+        lines.append(f"\n<b>{idx}. {heading}</b> — {html_escape(label)}\n{date}" + (f" — پیام #{mid}" if mid is not None else "") + excerpt_line + f"\n<code>{source}</code>")
     return "\n".join(lines), total
 
 

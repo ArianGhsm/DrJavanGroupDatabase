@@ -28,7 +28,16 @@ class _FailingIntelligenceProvider:
 
 def test_question_intelligence_provider_failure_falls_back_deterministically():
     engine = QuestionIntelligenceEngine(provider=_FailingIntelligenceProvider())
-    understanding, decision, fallback = engine.understand("most common odontogenic cyst?")
+    understanding, decision, fallback = engine.understand("علائم و تشخیص و درمان periodontitis چیه؟")
     assert fallback
-    assert "prevalence" in understanding.facets
+    assert {"signs", "diagnosis", "treatment"}.issubset(understanding.facets)
     assert decision is not None
+
+def test_simple_synthesis_is_fast_but_complex_and_verification_use_reasoning():
+    policy=ModelPolicy(fast_model="fast",reasoning_model="strong")
+    simple=policy.select(ModelStage.SYNTHESIS,facet_count=1)
+    hybrid_like=policy.select(ModelStage.SYNTHESIS,facet_count=3)
+    verify=policy.select(ModelStage.VERIFICATION,facet_count=1)
+    assert simple.tier==ModelTier.FAST and not simple.thinking_enabled
+    assert hybrid_like.tier==ModelTier.REASONING and hybrid_like.thinking_enabled
+    assert verify.tier==ModelTier.REASONING

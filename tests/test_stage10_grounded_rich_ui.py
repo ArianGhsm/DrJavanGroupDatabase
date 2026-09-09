@@ -46,7 +46,7 @@ def _answer(*, insufficient=False):
 
 def test_answer_renderer_visibly_makes_archive_the_only_authority():
     screen = answer_rich_screen(_answer())
-    assert "جمع‌بندی پیام‌های گروه" in screen.rich_html
+    assert "جمع‌بندی آرشیو گروه" in screen.rich_html
     assert "<blockquote>" in screen.rich_html
     assert "عبارت‌های پشتیبان از گروه" in screen.rich_html
     assert "کامپوزیت X خوب بود" in screen.rich_html
@@ -72,7 +72,7 @@ def test_rich_text_uses_send_rich_message_with_rtl_payload():
     body = parse_qs(transport.bodies[-1].decode())
     payload = json.loads(body["rich_message"][0])
     assert payload["is_rtl"] is True
-    assert "جمع‌بندی پیام‌های گروه" in payload["html"]
+    assert "جمع‌بندی آرشیو گروه" in payload["html"]
     assert "کامپوزیت X خوب بود" in payload["html"]
 
 
@@ -88,7 +88,7 @@ def test_rich_send_failure_falls_back_to_legacy_html_without_repeating_business_
     assert transport.urls[1].endswith("/sendMessage")
     fallback = parse_qs(transport.bodies[1].decode())["text"][0]
     assert fallback == str(rich)
-    assert "جمع‌بندی پیام‌های گروه" in fallback
+    assert "جمع‌بندی آرشیو گروه" in fallback
     assert "کامپوزیت X خوب بود" in fallback
 
 

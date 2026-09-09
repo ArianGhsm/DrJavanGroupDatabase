@@ -27,6 +27,9 @@ class QuestionContext:
     default_profession: str | None = "dentistry"
     default_country_code: str | None = "IR"
     default_country_label: str | None = "Iran"
+    recent_entities: tuple[EntityMention, ...] = ()
+    recent_subdomain: str | None = None
+    recent_geography: Geography = Geography()
 
 
 _ARCHIVE_MARKERS = (
@@ -65,6 +68,8 @@ def understand_question(
     facets = detect_facets(question)
 
     archive_specific = _contains_any(normalized, _ARCHIVE_MARKERS)
+    if archive_specific and facets == ("definition",) and not any(value in normalized for value in ("تعریف", "define", "definition")):
+        facets = ()
     explicit_science = _contains_any(normalized, _SCIENCE_MARKERS)
     explicit_current = _contains_any(normalized, _CURRENT_MARKERS)
     current_sensitive = any(
@@ -77,7 +82,10 @@ def understand_question(
         or "regulation" in facets
     )
 
-    domain, subdomain = _domain_and_subdomain(concepts, facets, context)
+    if _explicit_non_dental_context(normalized):
+        domain, subdomain = QuestionDomain.GENERAL, None
+    else:
+        domain, subdomain = _domain_and_subdomain(concepts, facets, context)
     entities = _entities(concepts)
     constraints = _constraints(normalized, entities, facets, context)
     entities = _augment_context_entities(entities, constraints, facets, context)
@@ -131,14 +139,16 @@ def _language_profile(raw: str) -> str:
 
 def _domain_and_subdomain(concepts, facets: tuple[str, ...], context: QuestionContext) -> tuple[str, str | None]:
     subdomains = [item.subdomain for item in concepts if item.subdomain]
-    if subdomains:
-        return QuestionDomain.DENTISTRY, subdomains[0]
+    if concepts:
+        return QuestionDomain.DENTISTRY, subdomains[0] if subdomains else None
     if any(facet in {"salary", "career", "cost"} for facet in facets):
         if context.default_domain == QuestionDomain.DENTISTRY:
             return QuestionDomain.DENTISTRY, "career_economics"
         return QuestionDomain.CAREER_ECONOMICS, "career_economics"
     if "regulation" in facets:
         return QuestionDomain.REGULATION, "regulation"
+    if facets and context.recent_subdomain:
+        return QuestionDomain.DENTISTRY, context.recent_subdomain
     if facets and context.default_domain:
         return str(context.default_domain), None
     return QuestionDomain.UNKNOWN, None
@@ -188,6 +198,18 @@ def _augment_context_entities(
             confidence=0.95,
             subdomain="career_economics",
         ))
+    # Recent conversation semantics may resolve an omitted subject in a follow-up,
+    # but are explicitly marked inferred and are never factual evidence.
+    explicit_topic = any(not item.inferred and item.entity_type not in {"career_stage"} for item in out)
+    if not explicit_topic and facets and context.recent_entities:
+        for item in context.recent_entities[:4]:
+            if item.canonical_id in {value.canonical_id for value in out}:
+                continue
+            out.append(EntityMention(
+                text=item.canonical_label, canonical_id=item.canonical_id, canonical_label=item.canonical_label,
+                entity_type=item.entity_type, variants=item.variants, inferred=True,
+                confidence=min(float(item.confidence), 0.72), subdomain=item.subdomain,
+            ))
     return tuple(out)
 
 
@@ -228,6 +250,11 @@ def _comparison_targets(normalized: str) -> tuple[str, ...]:
 def _geography(normalized: str, current_needed: bool, facets: tuple[str, ...], context: QuestionContext) -> Geography:
     if any(normalize_text(value) in normalized for value in _IRAN_MARKERS):
         return Geography(country_code="IR", label="Iran", explicit=True, source="question")
+    if current_needed and context.recent_geography.country_code:
+        return Geography(
+            country_code=context.recent_geography.country_code,
+            label=context.recent_geography.label, explicit=False, source="conversation",
+        )
     if current_needed and context.default_country_code:
         return Geography(
             country_code=context.default_country_code,
@@ -256,6 +283,10 @@ def _scientific_need(*, domain: str, facets: tuple[str, ...], archive_specific: 
 
 
 def _freshness(facets: tuple[str, ...], current_needed: bool, explicit_current: bool) -> str:
+    # "new/latest guideline" is a recent scientific-version question, not a
+    # market/current-web claim. Regulation remains current/official.
+    if "guideline" in facets and not current_needed:
+        return FreshnessClass.RECENT
     if explicit_current or current_needed:
         return FreshnessClass.CURRENT
     if any((spec := facet_spec(facet)) is not None and spec.freshness_sensitivity == FreshnessClass.RECENT for facet in facets):
@@ -322,6 +353,13 @@ def _confidence(normalized: str, facets: tuple[str, ...], concepts, ambiguities)
     if facets or concepts or len(tokenize(normalized)) >= 3:
         return ConfidenceClass.MEDIUM
     return ConfidenceClass.LOW
+
+
+def _explicit_non_dental_context(normalized: str) -> bool:
+    return any(value in normalized for value in (
+        "حقوق بشر", "حقوق مدنی", "human rights", "legal rights",
+        "cost function", "تابع هزینه", "loss function",
+    ))
 
 
 def _contains_any(normalized: str, values) -> bool:

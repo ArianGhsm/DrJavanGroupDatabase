@@ -14,12 +14,14 @@ from drjavanbot.ai.provider_v4 import DeepSeekV4AvalAIClient
 from drjavanbot.ai.telemetry import TelemetryStore
 from drjavanbot.search import SQLiteSearchBackend
 from drjavanbot.intelligence.archive_provider import archive_plan_from_request
+from drjavanbot.intelligence.cache import SourceAwareResponseCache
+from drjavanbot.intelligence.conversation import ConversationQuestionContext
 from drjavanbot.intelligence.core import DentalIntelligenceCore
 from drjavanbot.intelligence.model_policy import ModelPolicy
 from drjavanbot.intelligence.models import SourceType
 from drjavanbot.intelligence.planning import QuestionIntelligenceEngine
 from drjavanbot.intelligence.provider import AvalAIIntelligenceProvider
-from drjavanbot.intelligence.runtime import required_non_archive_sources, stage1_source_pending_answer
+from drjavanbot.intelligence.service import MultiSourceAnswerService
 from drjavanbot.secrets import AVALAI_API_KEY_SECRET,LocalFileSecretStore
 from drjavanbot.storage import database_health,full_reindex
 from .config import ALLOWED_MODELS
@@ -29,7 +31,7 @@ from .update_control import UpdateControl, VALID_UPDATE_MODES
 
 class RuntimeServices:
     def __init__(self,*,archive_dir:Path,data_dir:Path,cache_dir:Path,secret_dir:Path,base_ai_config:AIConfig,state:BotStateStore):
-        self.archive_dir=archive_dir; self.data_dir=data_dir; self.db_path=data_dir/"archive.sqlite3"; self.state=state; self.base_ai_config=base_ai_config; self.secret_store=LocalFileSecretStore(secret_dir); self.cache=ResilientResponseCache(cache_dir/"ai_responses.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.planner_cache=SearchPlanCache(cache_dir/"search_plans.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.telemetry=TelemetryStore(data_dir/"ai_usage.sqlite3"); self.updates=UpdateControl(data_dir); self._reindex_lock=threading.Lock(); self._reindex_lock_path=data_dir/"reindex.lock"
+        self.archive_dir=archive_dir; self.data_dir=data_dir; self.db_path=data_dir/"archive.sqlite3"; self.state=state; self.base_ai_config=base_ai_config; self.secret_store=LocalFileSecretStore(secret_dir); self.cache=ResilientResponseCache(cache_dir/"ai_responses.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.intelligence_cache=SourceAwareResponseCache(cache_dir/"intelligence_answers.sqlite3"); self.planner_cache=SearchPlanCache(cache_dir/"search_plans.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.telemetry=TelemetryStore(data_dir/"ai_usage.sqlite3"); self.updates=UpdateControl(data_dir); self._reindex_lock=threading.Lock(); self._reindex_lock_path=data_dir/"reindex.lock"
     def model(self):
         m=self.state.selected_model(self.base_ai_config.model); return m if m in ALLOWED_MODELS else self.base_ai_config.model
     def set_model(self,m):
@@ -48,16 +50,22 @@ class RuntimeServices:
         key=self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
         if not key: return False
         ok=DeepSeekV4AvalAIClient(self._ai_config()).validate_api_key(key); self.state.set_provider_auth_failed(not ok); return ok
-    def answer(self,question): return self._answer(question,progress=None)
-    def answer_with_progress(self,question,progress): return self._answer(question,progress=progress)
-    def _answer(self,question,progress=None):
+    def answer(self,question,*,user_id=None): return self._answer(question,progress=None,user_id=user_id)
+    def answer_with_progress(self,question,progress,*,user_id=None): return self._answer(question,progress=progress,user_id=user_id)
+    def _answer(self,question,progress=None,user_id=None):
         if not self.db_path.exists(): raise IndexNotReadyError("index database does not exist")
         backend=SQLiteSearchBackend(self.db_path); config=self._ai_config(); precomputed_plan=None; intelligence_calls=0
         if config.intelligence_v2 or config.source_router_v2:
-            intelligence_plan=self._intelligence_plan(question,config)
-            intelligence_calls=0 if intelligence_plan.planner_fallback_used else 1
-            if config.source_router_v2 and required_non_archive_sources(intelligence_plan.route):
-                return stage1_source_pending_answer(intelligence_plan.route,ai_calls=intelligence_calls)
+            intelligence_plan=self._intelligence_plan(question,config,user_id=user_id)
+            intelligence_calls=1 if (intelligence_plan.model_decision is not None and not intelligence_plan.planner_fallback_used) else 0
+            if user_id is not None:
+                try: self.state.set_conversation_context(int(user_id), ConversationQuestionContext.from_understanding(intelligence_plan.understanding))
+                except Exception: pass
+            if config.source_router_v2:
+                multi=MultiSourceAnswerService(backend=backend,secret_store=self.secret_store,config=config,cache=self.intelligence_cache,telemetry=self.telemetry,model_policy=ModelPolicy.from_env(default_model=self.model()))
+                try: result=multi.answer(intelligence_plan,progress=progress,understanding_ai_calls=intelligence_calls)
+                except AuthenticationError: self.state.set_provider_auth_failed(True); raise
+                self.state.set_provider_auth_failed(False); return result
             if config.intelligence_v2:
                 archive_request=next((item for item in intelligence_plan.retrieval_requests if item.source_type == SourceType.ARCHIVE),None)
                 if archive_request is not None:
@@ -70,23 +78,31 @@ class RuntimeServices:
             raise
         self.state.set_provider_auth_failed(False)
         return result.with_runtime(ai_calls=result.ai_calls+intelligence_calls) if intelligence_calls else result
-    def _intelligence_plan(self,question,config):
+    def _intelligence_plan(self,question,config,*,user_id=None):
         provider=None
         if config.intelligence_v2:
             api_key=self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
             if api_key:
                 provider=AvalAIIntelligenceProvider(api_key=api_key,base_config=config,telemetry=self.telemetry)
-        engine=QuestionIntelligenceEngine(provider=provider,model_policy=ModelPolicy.from_env(default_model=self.model()))
+        qcontext=None
+        if user_id is not None:
+            try: qcontext=self.state.get_conversation_context(int(user_id)).to_question_context()
+            except Exception: qcontext=None
+        engine=QuestionIntelligenceEngine(provider=provider,model_policy=ModelPolicy.from_env(default_model=self.model()),context=qcontext)
         return DentalIntelligenceCore(question_engine=engine).plan(question)
-    def source_details(self,message_ids,source_refs):
+    def source_details(self,message_ids,source_refs,external_sources=()):
         if not self.db_path.exists(): return []
-        backend=SQLiteSearchBackend(self.db_path); out=[]; seen=set()
+        backend=SQLiteSearchBackend(self.db_path); out=[]; seen=set(); external_by_ref={str(item.get("source_ref") or ""):item for item in external_sources if isinstance(item,dict)}
         for mid in message_ids:
             r=backend.get_message(int(mid))
             if r is None: continue
             seen.add(r.source_locator); out.append({"message_id":r.message_id,"author":r.author,"datetime":r.datetime_raw,"source_file":r.source_file,"source_ref":r.source_locator})
         for ref in source_refs:
-            if ref not in seen: out.append({"message_id":None,"author":None,"datetime":None,"source_file":ref.split("#",1)[0],"source_ref":ref})
+            if ref in seen: continue
+            ext=external_by_ref.get(str(ref))
+            if ext is not None:
+                out.append({"message_id":None,"author":ext.get("author_or_org"),"datetime":ext.get("timestamp") or ext.get("publication_year"),"source_file":ext.get("source_name") or ext.get("title"),"source_ref":ref,"source_type":ext.get("source_type"),"title":ext.get("title"),"url":ext.get("url"),"publication_type":ext.get("publication_type")}); seen.add(ref); continue
+            out.append({"message_id":None,"author":None,"datetime":None,"source_file":ref.split("#",1)[0],"source_ref":ref})
         return out
     def health(self):
         update=self.updates.status()
@@ -100,8 +116,8 @@ class RuntimeServices:
         except OSError: storage={}
         return {"bot":"up","index":index_health,"ai_configured":self.ai_configured(),"provider_auth_failed":self.state.provider_auth_failed(),"model":self.model(),"updater":{"state":update.state,"stage":update.stage,"target_sha":update.target_sha},"storage":storage}
     def stats(self):
-        idx=SQLiteSearchBackend(self.db_path).stats() if self.db_path.exists() else {}; return {"bot":self.state.usage_summary(),"ai":self.telemetry.summary(),"cache":self.cache.stats(),"planner_cache":self.planner_cache.stats(),"index":idx,"model":self.model(),"access_mode":self.state.access_mode(),"rate_limit_per_minute":self.state.rate_limit_per_minute(),"last_reindex_at":self.state.last_reindex_at()}
-    def clear_cache(self): return self.cache.clear()+self.planner_cache.clear()
+        idx=SQLiteSearchBackend(self.db_path).stats() if self.db_path.exists() else {}; return {"bot":self.state.usage_summary(),"ai":self.telemetry.summary(),"cache":self.cache.stats(),"planner_cache":self.planner_cache.stats(),"intelligence_cache":self.intelligence_cache.stats(),"index":idx,"model":self.model(),"access_mode":self.state.access_mode(),"rate_limit_per_minute":self.state.rate_limit_per_minute(),"last_reindex_at":self.state.last_reindex_at()}
+    def clear_cache(self): return self.cache.clear()+self.planner_cache.clear()+self.intelligence_cache.clear()
 
     # Admin Control Center / updater contract.
     def update_mode(self): return self.state.update_mode()

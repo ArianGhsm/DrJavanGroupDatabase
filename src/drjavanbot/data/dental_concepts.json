@@ -1,22 +1,247 @@
 {
   "version": 1,
   "concepts": [
-    {"id":"odontogenic","canonical":"odontogenic","entity_type":"descriptor","subdomain":"oral_pathology","terms":["odontogenic","اودونتوژنیک","اودنتوژنیک","ادنتوژنیک","اودونتوجنیک","ادنتوجنیک"]},
-    {"id":"odontogenic_cyst","canonical":"odontogenic cyst","entity_type":"disease_group","subdomain":"oral_pathology","terms":["odontogenic cyst","odontogenic cysts","کیست اودونتوژنیک","کیست اودنتوژنیک","کیست ادنتوژنیک","کیست‌های اودونتوژنیک","کیست های ادنتوژنیک","سیست اودنتوژنیک"]},
-    {"id":"cyst","canonical":"cyst","entity_type":"lesion_type","subdomain":"oral_pathology","terms":["cyst","cysts","کیست","کیست ها","کیست های","کیست‌ها","کیست‌های","سیست"]},
-    {"id":"dentistry","canonical":"dentistry","entity_type":"profession","subdomain":null,"terms":["dentistry","dentist","dental","دندانپزشکی","دندان پزشکی","دندانپزشک","دندان پزشک","دندانپزشکا"]},
-    {"id":"new_graduate","canonical":"new graduate","entity_type":"career_stage","subdomain":"career_economics","terms":["new graduate","newly graduated","تازه فارغ التحصیل","تازه فارغ‌التحصیل","فارغ التحصیل جدید","تازه کار","تازه‌کار"]},
-    {"id":"oral_pathology","canonical":"oral pathology","entity_type":"discipline","subdomain":"oral_pathology","terms":["oral pathology","پاتولوژی دهان","بیماری شناسی دهان"]},
-    {"id":"oral_medicine","canonical":"oral medicine","entity_type":"discipline","subdomain":"oral_medicine","terms":["oral medicine","بیماری های دهان","طب دهان"]},
-    {"id":"oral_radiology","canonical":"oral radiology","entity_type":"discipline","subdomain":"oral_radiology","terms":["oral radiology","رادیولوژی دهان","رادیولوژی فک"]},
-    {"id":"endodontics","canonical":"endodontics","entity_type":"discipline","subdomain":"endodontics","terms":["endodontics","endodontic","endo","اندو","اندودانتیکس","اندودنتیک"]},
-    {"id":"periodontics","canonical":"periodontics","entity_type":"discipline","subdomain":"periodontics","terms":["periodontics","periodontal","perio","پریو","پریودنتال"]},
-    {"id":"restorative_dentistry","canonical":"restorative dentistry","entity_type":"discipline","subdomain":"restorative","terms":["restorative","operative dentistry","ترمیمی","دندانپزشکی ترمیمی"]},
-    {"id":"prosthodontics","canonical":"prosthodontics","entity_type":"discipline","subdomain":"prosthodontics","terms":["prosthodontics","prostho","پروتز","پروستودانتیکس"]},
-    {"id":"orthodontics","canonical":"orthodontics","entity_type":"discipline","subdomain":"orthodontics","terms":["orthodontics","orthodontic","ortho","ارتودنسی","ارتودنتیک"]},
-    {"id":"pediatric_dentistry","canonical":"pediatric dentistry","entity_type":"discipline","subdomain":"pediatric_dentistry","terms":["pediatric dentistry","pedodontics","pedo","دندانپزشکی کودکان","کودکان"]},
-    {"id":"oral_surgery","canonical":"oral surgery","entity_type":"discipline","subdomain":"oral_surgery","terms":["oral surgery","maxillofacial surgery","جراحی دهان","جراحی فک و صورت"]},
-    {"id":"implant_dentistry","canonical":"implant dentistry","entity_type":"discipline","subdomain":"implant_dentistry","terms":["implant dentistry","implant","ایمپلنت","فیکسچر","fixture"]},
-    {"id":"dental_pharmacology","canonical":"dental pharmacology","entity_type":"discipline","subdomain":"pharmacology","terms":["pharmacology","فارماکولوژی","داروشناسی"]}
+    {
+      "id": "odontogenic",
+      "canonical": "odontogenic",
+      "entity_type": "descriptor",
+      "subdomain": "oral_pathology",
+      "terms": [
+        "odontogenic",
+        "اودونتوژنیک",
+        "اودنتوژنیک",
+        "ادنتوژنیک",
+        "اودونتوجنیک",
+        "ادنتوجنیک",
+        "اودنتوجنیک"
+      ]
+    },
+    {
+      "id": "odontogenic_cyst",
+      "canonical": "odontogenic cyst",
+      "entity_type": "disease_group",
+      "subdomain": "oral_pathology",
+      "terms": [
+        "odontogenic cyst",
+        "odontogenic cysts",
+        "کیست اودونتوژنیک",
+        "کیست اودنتوژنیک",
+        "کیست ادنتوژنیک",
+        "کیست‌های اودونتوژنیک",
+        "کیست های ادنتوژنیک",
+        "سیست اودنتوژنیک",
+        "سیست اودنتوجنیک",
+        "کیست اودنتوجنیک"
+      ]
+    },
+    {
+      "id": "cyst",
+      "canonical": "cyst",
+      "entity_type": "lesion_type",
+      "subdomain": "oral_pathology",
+      "terms": [
+        "cyst",
+        "cysts",
+        "کیست",
+        "کیست ها",
+        "کیست های",
+        "کیست‌ها",
+        "کیست‌های",
+        "سیست"
+      ]
+    },
+    {
+      "id": "dentistry",
+      "canonical": "dentistry",
+      "entity_type": "profession",
+      "subdomain": null,
+      "terms": [
+        "dentistry",
+        "dentist",
+        "dental",
+        "دندانپزشکی",
+        "دندان پزشکی",
+        "دندانپزشک",
+        "دندان پزشک",
+        "دندانپزشکا"
+      ]
+    },
+    {
+      "id": "new_graduate",
+      "canonical": "new graduate",
+      "entity_type": "career_stage",
+      "subdomain": "career_economics",
+      "terms": [
+        "new graduate",
+        "newly graduated",
+        "تازه فارغ التحصیل",
+        "تازه فارغ‌التحصیل",
+        "فارغ التحصیل جدید",
+        "تازه کار",
+        "تازه‌کار"
+      ]
+    },
+    {
+      "id": "oral_pathology",
+      "canonical": "oral pathology",
+      "entity_type": "discipline",
+      "subdomain": "oral_pathology",
+      "terms": [
+        "oral pathology",
+        "پاتولوژی دهان",
+        "بیماری شناسی دهان"
+      ]
+    },
+    {
+      "id": "oral_medicine",
+      "canonical": "oral medicine",
+      "entity_type": "discipline",
+      "subdomain": "oral_medicine",
+      "terms": [
+        "oral medicine",
+        "بیماری های دهان",
+        "طب دهان"
+      ]
+    },
+    {
+      "id": "oral_radiology",
+      "canonical": "oral radiology",
+      "entity_type": "discipline",
+      "subdomain": "oral_radiology",
+      "terms": [
+        "oral radiology",
+        "رادیولوژی دهان",
+        "رادیولوژی فک"
+      ]
+    },
+    {
+      "id": "endodontics",
+      "canonical": "endodontics",
+      "entity_type": "discipline",
+      "subdomain": "endodontics",
+      "terms": [
+        "endodontics",
+        "endodontic",
+        "endo",
+        "اندو",
+        "اندودانتیکس",
+        "اندودنتیک"
+      ]
+    },
+    {
+      "id": "periodontics",
+      "canonical": "periodontics",
+      "entity_type": "discipline",
+      "subdomain": "periodontics",
+      "terms": [
+        "periodontics",
+        "periodontal",
+        "perio",
+        "پریو",
+        "پریودنتال"
+      ]
+    },
+    {
+      "id": "restorative_dentistry",
+      "canonical": "restorative dentistry",
+      "entity_type": "discipline",
+      "subdomain": "restorative",
+      "terms": [
+        "restorative",
+        "operative dentistry",
+        "ترمیمی",
+        "دندانپزشکی ترمیمی"
+      ]
+    },
+    {
+      "id": "prosthodontics",
+      "canonical": "prosthodontics",
+      "entity_type": "discipline",
+      "subdomain": "prosthodontics",
+      "terms": [
+        "prosthodontics",
+        "prostho",
+        "پروتز",
+        "پروستودانتیکس"
+      ]
+    },
+    {
+      "id": "orthodontics",
+      "canonical": "orthodontics",
+      "entity_type": "discipline",
+      "subdomain": "orthodontics",
+      "terms": [
+        "orthodontics",
+        "orthodontic",
+        "ortho",
+        "ارتودنسی",
+        "ارتودنتیک"
+      ]
+    },
+    {
+      "id": "pediatric_dentistry",
+      "canonical": "pediatric dentistry",
+      "entity_type": "discipline",
+      "subdomain": "pediatric_dentistry",
+      "terms": [
+        "pediatric dentistry",
+        "pedodontics",
+        "pedo",
+        "دندانپزشکی کودکان",
+        "کودکان"
+      ]
+    },
+    {
+      "id": "oral_surgery",
+      "canonical": "oral surgery",
+      "entity_type": "discipline",
+      "subdomain": "oral_surgery",
+      "terms": [
+        "oral surgery",
+        "maxillofacial surgery",
+        "جراحی دهان",
+        "جراحی فک و صورت"
+      ]
+    },
+    {
+      "id": "implant_dentistry",
+      "canonical": "implant dentistry",
+      "entity_type": "discipline",
+      "subdomain": "implant_dentistry",
+      "terms": [
+        "implant dentistry",
+        "implant",
+        "ایمپلنت",
+        "فیکسچر",
+        "fixture"
+      ]
+    },
+    {
+      "id": "dental_pharmacology",
+      "canonical": "dental pharmacology",
+      "entity_type": "discipline",
+      "subdomain": "pharmacology",
+      "terms": [
+        "pharmacology",
+        "فارماکولوژی",
+        "داروشناسی"
+      ]
+    },
+    {
+      "id": "root_canal_treatment",
+      "canonical": "root canal treatment",
+      "entity_type": "procedure",
+      "subdomain": "endodontics",
+      "terms": [
+        "rct",
+        "R.C.T",
+        "root canal",
+        "root canal treatment",
+        "endodontic treatment",
+        "درمان ریشه",
+        "عصب کشی",
+        "عصب‌کشی"
+      ]
+    }
   ]
 }

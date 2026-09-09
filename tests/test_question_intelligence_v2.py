@@ -23,7 +23,7 @@ def test_cyst_prevalence_regression_understanding_is_not_recommendation():
         assert "prevalence" in u.facets
         assert "recommendation" not in u.facets
         assert u.scientific_evidence_needed
-        assert route_sources(u).selected_sources[0].source_type == SourceType.DENTAL_KNOWLEDGE
+        assert route_sources(u).selected_sources[0].source_type == SourceType.SCIENTIFIC
 
 
 def test_salary_regressions_route_current_unless_user_explicitly_asks_archive():
@@ -78,6 +78,18 @@ def test_llm_parser_fails_closed_to_typed_schema_and_engine_has_deterministic_fa
         def generate_json(self, **_kwargs):
             return "{broken"
 
-    understood, decision, fallback = QuestionIntelligenceEngine(provider=Broken()).understand("most common odontogenic cyst?")
+    understood, decision, fallback = QuestionIntelligenceEngine(provider=Broken()).understand("علائم و تشخیص و درمان periodontitis چیه؟")
     assert fallback and decision is not None
-    assert "prevalence" in understood.facets
+    assert {"signs", "diagnosis", "treatment"}.issubset(understood.facets)
+
+def test_model_facets_are_ontology_locked_and_redundant_frequency_is_collapsed():
+    import json
+    from drjavanbot.intelligence.planning import parse_question_understanding
+    payload={
+        "schema_version":"question-intelligence-v2.0","domain":"dentistry","subdomain":"oral_pathology",
+        "intent":"factual","facets":["prevalence","frequency","ranking"],"geography":{},
+        "freshness":"evergreen","archive_specific":False,"scientific_evidence_needed":True,
+        "current_information_needed":False,"confidence_class":"high","safety_class":"general"
+    }
+    u=parse_question_understanding(json.dumps(payload),question="most common odontogenic cyst?")
+    assert u.facets == ("prevalence",)

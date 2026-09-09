@@ -56,7 +56,7 @@ FACET_SPECS: tuple[FacetSpec, ...] = (
     _s("epidemiology", ("اپیدمیولوژی", "epidemiology", "شیوع"), ("اپیدمیولوژی", "epidemiology", "شیوع", "prevalence", "incidence"), shape="epidemiologic"),
     _s("age", ("چه سن", "چند سالگی", "سن", "age", "how old"), ("سن", "سالگی", "age", "year"), shape="numeric_or_age", numeric=True),
     _s("sex", ("جنس", "مرد", "زن", "male", "female", "sex", "gender"), ("مرد", "زن", "male", "female", "sex", "gender"), shape="distribution"),
-    _s("population", ("جمعیت", "کودک", "بچه", "نوجوان", "بزرگسال", "population", "children", "pediatric", "adult"), ("کودک", "بچه", "نوجوان", "بزرگسال", "population", "children", "pediatric", "adult"), shape="population"),
+    _s("population", ("جمعیت", "کودک", "بچه", "نوجوان", "بزرگسال", "population", "children", "pediatric", "adult", "adults"), ("کودک", "بچه", "نوجوان", "بزرگسال", "population", "children", "pediatric", "adult", "adults"), shape="population"),
     _s("location", ("کجا", "محل", "ناحیه", "location", "site", "where"), ("محل", "ناحیه", "location", "site", "فک", "قدام", "خلف"), shape="anatomic_location"),
     _s("distribution", ("توزیع", "distribution", "پراکندگی"), ("توزیع", "distribution", "پراکندگی"), shape="distribution"),
     _s("etiology", ("اتیولوژی", "etiology"), ("اتیولوژی", "etiology", "ناشی", "مرتبط"), shape="causal"),
@@ -77,7 +77,7 @@ FACET_SPECS: tuple[FacetSpec, ...] = (
     _s("timing", ("چه زمانی", "چه موقع", "زمان", "when", "timing"), ("زمان", "قبل", "بعد", "when", "timing", "before", "after"), shape="temporal"),
     _s("duration", ("مدت", "چقدر طول", "duration", "how long"), ("مدت", "روز", "هفته", "ماه", "duration", "day", "week", "month"), shape="duration", numeric=True),
     _s("comparison", ("مقایسه", "در مقایسه", "vs", "versus", "کدوم بهتر", "کدام بهتر"), ("بهتر", "کمتر", "بیشتر", "مقایسه", "versus", "vs", "compared"), shape="comparative"),
-    _s("recommendation", ("پیشنهاد", "توصیه", "بهترین", "recommend", "recommended", "best"), ("پیشنهاد", "توصیه", "بهترین", "recommend", "recommended", "prefer"), shape="recommendation", affinity=_ARCHIVE_FRIENDLY),
+    _s("recommendation", ("پیشنهاد", "توصیه", "بهترین", "خوبه", "خوب است", "recommend", "recommended", "best", "is it good"), ("پیشنهاد", "توصیه", "بهترین", "recommend", "recommended", "prefer"), shape="recommendation", affinity=_ARCHIVE_FRIENDLY),
     _s("prognosis", ("پیش آگهی", "پروگنوز", "prognosis", "outcome"), ("پیش آگهی", "پروگنوز", "prognosis", "outcome", "موفقیت"), shape="outcome"),
     _s("recurrence", ("عود", "عودش", "recurrence", "recur"), ("عود", "recurrence", "recur", "عود می"), shape="outcome"),
     _s("complication", ("عارضه", "عوارض", "complication", "adverse"), ("عارضه", "عوارض", "complication", "adverse"), shape="adverse_outcome"),
@@ -86,7 +86,7 @@ FACET_SPECS: tuple[FacetSpec, ...] = (
     _s("product", ("محصول", "برند", "مارک", "product", "brand"), ("محصول", "برند", "مارک", "product", "brand"), shape="entity_fact", affinity=_ARCHIVE_FRIENDLY),
     _s("cost", ("هزینه", "قیمت", "fee", "cost", "price"), ("هزینه", "قیمت", "تومان", "ریال", "fee", "cost", "price"), shape="numeric_current", freshness=FreshnessClass.CURRENT, affinity=_CURRENT, numeric=True, current_timestamp=True),
     _s("salary", ("حقوق", "درآمد", "دستمزد", "salary", "income", "compensation", "wage"), ("حقوق", "درآمد", "دستمزد", "salary", "income", "compensation", "wage", "تومان", "ریال"), shape="numeric_current", freshness=FreshnessClass.CURRENT, affinity=_CURRENT, numeric=True, current_timestamp=True),
-    _s("career", ("شغل", "بازار کار", "تازه فارغ", "فارغ التحصیل", "career", "job", "new graduate"), ("شغل", "بازار کار", "فارغ", "career", "job", "graduate"), shape="current_context", freshness=FreshnessClass.CURRENT, affinity=_CURRENT),
+    _s("career", ("شغل", "بازار کار", "تازه فارغ", "فارغ التحصیل", "تازه کار", "تازه‌کار", "career", "job", "new graduate"), ("شغل", "بازار کار", "فارغ", "تازه کار", "career", "job", "graduate"), shape="current_context", freshness=FreshnessClass.CURRENT, affinity=_CURRENT),
     _s("regulation", ("قانون", "مقررات", "آیین نامه", "مجوز", "regulation", "law", "license"), ("قانون", "مقررات", "آیین نامه", "مجوز", "regulation", "law", "license"), shape="official_current", freshness=FreshnessClass.CURRENT, affinity=(SourceType.OFFICIAL, SourceType.CURRENT_WEB, SourceType.ARCHIVE), current_timestamp=True),
     _s("guideline", ("گایدلاین", "راهنمای بالینی", "guideline", "recommendation guideline"), ("گایدلاین", "guideline", "recommendation", "consensus"), shape="guideline", freshness=FreshnessClass.RECENT, affinity=(SourceType.SCIENTIFIC, SourceType.OFFICIAL, SourceType.DENTAL_KNOWLEDGE)),
     _s("clinical_decision", ("تصمیم درمانی", "چه کار کنم", "انتخاب درمان", "clinical decision", "treatment planning"), ("تصمیم", "انتخاب", "درمان", "decision", "plan"), shape="decision", affinity=(SourceType.DENTAL_KNOWLEDGE, SourceType.SCIENTIFIC, SourceType.OFFICIAL)),
@@ -108,6 +108,12 @@ def detect_facets(question: str) -> tuple[str, ...]:
     for spec in FACET_SPECS:
         if any(_marker_match(padded, marker) for marker in spec.markers):
             found.append(spec.name)
+    # Guard common non-dental homonyms before copular-definition suppression.
+    if any(value in normalized for value in ("حقوق بشر", "حقوق مدنی", "human rights", "legal rights")) and "salary" in found:
+        found.remove("salary")
+    if any(value in normalized for value in ("cost function", "تابع هزینه", "loss function")) and "cost" in found:
+        found.remove("cost")
+
     # More specific facets subsume their broad linguistic neighbours.
     if "differential_diagnosis" in found and "diagnosis" in found:
         found.remove("diagnosis")
@@ -116,6 +122,14 @@ def detect_facets(question: str) -> tuple[str, ...]:
     if "prevalence" in found and "recommendation" in found:
         # "رایج/شایع" is a frequency request, not a recommendation.
         found.remove("recommendation")
+    if "population" in found and any(value in normalized for value in ("بچه های گروه", "بچه های گروه", "بچه‌های گروه")):
+        if not any(value in normalized for value in ("کودک", "نوجوان", "pediatric", "child", "adult")):
+            found.remove("population")
+    if "treatment" in found and any(value in found for value in ("contraindication", "prognosis", "follow_up", "duration", "cost")):
+        if not _explicit_treatment_request(normalized):
+            found.remove("treatment")
+    if "technique" in found and "method" in found and not any(value in normalized for value in ("تکنیک", "technique")):
+        found.remove("technique")
     if "definition" in found and len(found) > 1:
         # Persian copular frames such as "X چیه؟" often terminate a more
         # specific request (diagnosis, prevalence, guideline, etc.). Keep
@@ -148,11 +162,22 @@ def _marker_match(padded: str, marker: str) -> bool:
         return False
     if " " in needle:
         return needle in padded
+    if re.search(r"[\u0600-\u06ff]", needle):
+        # Persian colloquial writing frequently attaches clitic/plural suffixes
+        # (e.g. درآمدش، شیوعش، تازه‌کارها). Keep the allowed suffix set small.
+        return re.search(rf"(?<![\w\u0600-\u06ff]){re.escape(needle)}(?:ش|م|ت|ها|های)?(?![\w\u0600-\u06ff])", padded) is not None
     return re.search(rf"(?<![\w\u0600-\u06ff]){re.escape(needle)}(?![\w\u0600-\u06ff])", padded) is not None
 
 
 def _explicit_method(normalized: str) -> bool:
     return any(value in normalized for value in ("روش", "چطور", "چگونه", "نحوه", "method", "how", "steps"))
+
+
+def _explicit_treatment_request(normalized: str) -> bool:
+    return any(value in normalized for value in (
+        "درمانش", "درمان چیست", "درمان چیه", "درمان چی", "چه درمان", "و درمان",
+        "درمانی پیشنهاد", "treatment", "management", "manage",
+    ))
 
 
 __all__ = ["FacetSpec", "FACET_SPECS", "FACET_BY_NAME", "detect_facets", "evidence_signal", "facet_spec"]

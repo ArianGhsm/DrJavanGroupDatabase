@@ -40,6 +40,7 @@ class TelemetryStore:
         result_class: str | None = None,
         reason_code: str | None = None,
         logical_call: int | None = None,
+        attempt: int | None = None,
         evidence_count: int | None = None,
         finish_reason: str | None = None,
     ) -> None:
@@ -48,12 +49,12 @@ class TelemetryStore:
             con.execute(
                 "INSERT INTO ai_usage(created_at,request_type,model,input_tokens,cached_input_tokens,output_tokens,"
                 "cost_irt,cost_unit,exchange_rate,latency_ms,success,error_class,stage,result_class,reason_code,"
-                "logical_call,evidence_count,finish_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "logical_call,attempt,evidence_count,finish_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     time.time(), request_type, model, usage.input_tokens, usage.cached_input_tokens,
                     usage.output_tokens, usage.cost_irt, usage.cost_unit, usage.exchange_rate,
                     float(latency_ms), 1 if success else 0, error_class, stage, result_class,
-                    reason_code, logical_call, evidence_count, finish_reason,
+                    reason_code, logical_call, attempt, evidence_count, finish_reason,
                 ),
             )
 
@@ -86,6 +87,7 @@ class TelemetryStore:
                 "result_class": "TEXT",
                 "reason_code": "TEXT",
                 "logical_call": "INTEGER",
+                "attempt": "INTEGER",
                 "evidence_count": "INTEGER",
                 "finish_reason": "TEXT",
             }

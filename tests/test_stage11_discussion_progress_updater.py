@@ -214,11 +214,11 @@ def test_progressive_app_shows_real_stages_and_deletes_status_after_answer():
     )
     app._handle_question(42, 42, "کدوم کامپوزیت خوبه؟")
     assert api.sent
-    assert "در حال بررسی آرشیو" in api.sent[0][1]
+    assert "در حال بررسی سؤال و منابع" in api.sent[0][1]
     combined="\n".join(item[2] for item in api.edited)
     assert "جست" in combined
     assert "گفت" in combined or "context" in combined
-    assert "message_id" in combined
+    assert "تأیید" in combined or "شواهد" in combined
     assert any("پاسخ مستند" in item[1] for item in api.sent[1:])
     assert (42,77) in api.deleted
     assert len(api.actions) >= 2

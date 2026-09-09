@@ -1,8 +1,8 @@
-# DrJavanBot — موتور جست‌وجو و پاسخ مستند آرشیو گروه دکتر مهدی جوان
+# DrJavanBot — Dental Intelligence Assistant با دسترسی ویژه به آرشیو گروه دکتر مهدی جوان
 
 > این پروژه توسط **آریان قاسم‌پور** ساخته شده است.
 
-این ریپازیتوری هم آرشیو Telegram HTML Export گروه دکتر مهدی جوان را نگه می‌دارد و هم زیرساخت رباتی را می‌سازد که سؤال را با جست‌وجوی محلی در کل آرشیو پاسخ می‌دهد. ربات **چت‌بات عمومی دندان‌پزشکی نیست**: DeepSeek/AvalAI فقط برای فهم سؤال، کمک محدود به query expansion، ارزیابی ارتباط evidence و synthesis استفاده می‌شود و نباید خلأ شواهد آرشیو را با دانش عمومی مدل پر کند.
+این ریپازیتوری هم آرشیو Telegram HTML Export گروه دکتر مهدی جوان را نگه می‌دارد و هم **Dental Intelligence Assistant** چندمنبعی را اجرا می‌کند. آرشیو برای سؤال «گروه چه گفته؟» منبع privileged است؛ facts علمی از Scientific/Official evidence و اطلاعات زمان‌حساس از Current/Official evidence می‌آیند. DeepSeek/AvalAI می‌تواند سؤال، routing و synthesis را انجام دهد، اما **حافظه عمومی مدل factual authority نیست** و هیچ خلأ شواهدی را حق ندارد با حدس پر کند.
 
 > **حفظ سیاست قبلی:** نسخه کامل و بدون تغییر README/راهنمای تحلیل پیش از تبدیل پروژه به ربات، عیناً در [`docs/original-analysis-policy.md`](docs/original-analysis-policy.md) نگه‌داری شده است. نسخه فشرده اجرایی در [`docs/answer-policy.md`](docs/answer-policy.md) قرار دارد. بنابراین هیچ‌یک از قواعد تحلیلی قبلی حذف نشده‌اند.
 
@@ -13,17 +13,15 @@
 معماری هدف:
 
 ```text
-Telegram
-  → Question Router
-  → Local Normalizer / Query Variants
-  → SQLite + FTS5 Retrieval
-  → Reply / Context Expansion
-  → Deduplication + Local Ranking
-  → optional AI Query Assist (only on weak retrieval)
-  → Compact Evidence Pack
-  → AvalAI / DeepSeek Relevance + Synthesis
-  → Citation Validation
-  → Telegram Answer
+Question + bounded conversation context
+  → Question Intelligence (intent/domain/entity/facet/freshness)
+  → Source Router (Archive / Scientific / Current / Official)
+  → source-specific Query Generation
+  → parallel required-source Retrieval
+  → Evidence Fusion + RequestedFactCoverage
+  → Compact Grounded Synthesis (support IDs only)
+  → Application-owned verbatim support + Multi-Source Claim Validation
+  → route-aware Telegram Answer + Citations
 ```
 
 مسیر داده:
@@ -37,7 +35,7 @@ Telegram HTML Export
   → Full / Incremental Reindex
 ```
 
-هدف طراحی، **یک AI call برای مسیر عادی هر سؤال** است. فراخوانی دوم فقط fallback برای سؤال مبهم یا retrieval ضعیف خواهد بود. آرشیو کامل هیچ‌وقت برای هر سؤال به مدل ارسال نمی‌شود.
+هدف طراحی، **۰ AI call برای فهم سؤال‌های ساده و مسیرهای archive ساده و معمولاً ۱ call برای synthesis علمی/current/hybrid مستند** است. فقط ambiguity/complexity یا حداکثر یک repair محدود می‌تواند call اضافه ایجاد کند. retrievalهای مستقل چندمنبعی parallel می‌شوند و هیچ raw archive کامل یا full copyrighted article برای هر سؤال به مدل ارسال نمی‌شود.
 
 جزئیات تصمیم‌های معماری در [`docs/architecture/ADR-001-core-architecture.md`](docs/architecture/ADR-001-core-architecture.md) و ممیزی داده در [`docs/data-audit.md`](docs/data-audit.md) ثبت شده است.
 
@@ -76,11 +74,13 @@ Stage 4 این قابلیت‌ها را پیاده‌سازی کرده است:
 
 ---
 
-# سیاست اجرایی پاسخ بر اساس آرشیو
+# سیاست اجرایی منابع و پاسخ
 
-این بخش خلاصه اجرایی قواعد اصلی است؛ متن کامل و بدون تغییر سیاست قبلی در [`docs/original-analysis-policy.md`](docs/original-analysis-policy.md) مرجع الزام‌آور باقی می‌ماند.
+این بخش قواعد archive را در معماری جدید خلاصه می‌کند. contract نهایی چندمنبعی در [`docs/intelligence-v2/SOURCE_POLICY.md`](docs/intelligence-v2/SOURCE_POLICY.md) و [`docs/intelligence-v2/ANSWER_POLICY.md`](docs/intelligence-v2/ANSWER_POLICY.md) مرجع اجرایی است؛ [`docs/original-analysis-policy.md`](docs/original-analysis-policy.md) فقط سیاست تاریخی تحلیل آرشیو را حفظ می‌کند.
 
 ## 1. اصل بنیادین
+
+Source authority تابع intent است. سؤال صریح درباره گروه باید پس از جست‌وجوی همه بخش‌های مرتبط آرشیو پاسخ داده شود؛ سؤال علمی factual باید scientific evidence داشته باشد و سؤال current باید evidence تاریخ‌دار/current داشته باشد. مدل به‌تنهایی منبع factual نیست.
 
 هر پرسش درباره محتوای این آرشیو باید پس از جست‌وجوی همه بخش‌های مرتبط پاسخ داده شود. دیدگاه‌های موافق، مخالف، خنثی، تجربی و اصلاحی باید دیده شوند و محدودیت و میزان اطمینان پاسخ روشن باشد. اگر حجم داده زیاد است، نمونه‌گیری سطحی کافی نیست؛ باید از جست‌وجوی چندمرحله‌ای، کلیدواژه‌ها، مترادف‌ها، شکل‌های فارسی/انگلیسی/فینگلیش، غلط‌های املایی محتمل، نام افراد/برندها و زمینه زمانی استفاده شود.
 
@@ -106,7 +106,7 @@ Stage 4 این قابلیت‌ها را پیاده‌سازی کرده است:
 
 ## 7. فرایند پاسخ
 
-فهم سؤال → ساخت برنامه جست‌وجو → جست‌وجوی چندلایه کل archive → context/reply expansion → گروه‌بندی evidence → ارزیابی کیفیت/اختلاف → پاسخ نهایی.
+فهم سؤال → intent/facet/freshness → انتخاب source → query مخصوص هر source → retrieval → fusion/rerank → requested-fact coverage → grounded synthesis → claim validation → پاسخ source-aware. در مسیر Archive، context/reply expansion و discussion graph حفظ می‌شود.
 
 ## 8. قالب پاسخ adaptive
 
@@ -134,7 +134,7 @@ Stage 4 این قابلیت‌ها را پیاده‌سازی کرده است:
 
 ## 14. دستور اجرایی مدل
 
-مدل فقط پس از retrieval محلی evidence را تحلیل می‌کند. اگر retrieval کافی نیست، مدل باید ناکافی بودن evidence را اعلام کند و حق ندارد پاسخ textbook را از حافظه خودش جایگزین کند.
+مدل فقط evidence بازیابی‌شده از sourceهای route‌شده را تحلیل می‌کند. اگر evidence لازم کافی نیست، سیستم باید ناکافی بودن شواهد را اعلام کند و حق ندارد پاسخ textbook، عدد بازار یا guideline را از حافظه خودش جایگزین کند.
 
 ## 15. شواهد ناکافی
 
@@ -150,4 +150,4 @@ Stage 4 این قابلیت‌ها را پیاده‌سازی کرده است:
 
 ## 18. جمع‌بندی سیاست
 
-خروجی ربات باید **مستند، چندجانبه، قابل ردیابی و محدود به شواهد archive** باشد. Confidence فقط `High / Medium / Low` با دلیل واقعی است؛ درصد ساختگی ممنوع است.
+خروجی ربات باید **مستند، چندجانبه، قابل ردیابی و محدود به evidence مجاز route** باشد. Archive opinion، Scientific evidence، Guideline/Official و Current market info با label جدا نمایش داده می‌شوند. Confidence فقط `High / Medium / Low` با دلیل واقعی است؛ درصد ساختگی ممنوع است.

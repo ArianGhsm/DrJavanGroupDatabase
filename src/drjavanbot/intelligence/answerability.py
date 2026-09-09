@@ -5,18 +5,12 @@ import re
 from typing import Iterable
 
 from drjavanbot.normalization import normalize_text
-from .facets import evidence_signal
-from .models import (
-    EvidenceItem,
-    FacetCoverage,
-    FreshnessClass,
-    QuestionUnderstanding,
-    RequestedFactCoverage,
-    SourceRoute,
-    SourceType,
-)
+from .facets import evidence_signal, facet_spec
+from .models import EvidenceItem, FacetCoverage, FreshnessClass, QuestionUnderstanding, RequestedFactCoverage, SourceRoute, SourceType
 
-_CONFLICT_MARKERS = ("اما", "ولی", "مخالف", "اشتباه", "نه", "however", "disagree", "incorrect", "conflict")
+_CONFLICT_MARKERS = ("اما", "ولی", "مخالف", "اشتباه", "نه", "however", "disagree", "incorrect", "conflict", "in contrast")
+_SCIENTIFIC_AUTHORITY = {SourceType.SCIENTIFIC, SourceType.OFFICIAL, SourceType.DENTAL_KNOWLEDGE}
+_CURRENT_AUTHORITY = {SourceType.CURRENT_WEB, SourceType.OFFICIAL}
 
 
 def assess_requested_fact_coverage(
@@ -33,81 +27,86 @@ def assess_requested_fact_coverage(
 
     facet_results: list[FacetCoverage] = []
     for facet in understanding.facets:
+        allowed = _facet_source_types(understanding, route, facet)
+        candidates = tuple(item for item in topic_items if str(item.source_type) in allowed and _item_fresh_enough(understanding, facet, item, now=now))
         best = (False, 0.0, "facet_semantic_signal_missing")
-        for item in topic_items:
+        for item in candidates:
             signal = evidence_signal(_combined_text(item), facet)
             if signal[1] > best[1]:
                 best = signal
             if signal[0] and signal[1] >= 0.9:
                 break
-        facet_results.append(FacetCoverage(
-            facet=facet,
-            supported=bool(best[0]),
-            score=float(best[1]),
-            signal_code=str(best[2]),
-        ))
+        if not candidates:
+            signal_code = "eligible_source_or_freshness_missing"
+        else:
+            signal_code = str(best[2])
+        facet_results.append(FacetCoverage(facet=facet, supported=bool(best[0]), score=float(best[1]), signal_code=signal_code))
 
-    requested_fact_supported = topic_present and (
-        all(item.supported for item in facet_results) if facet_results else True
-    )
-    direct_items = [item for item in topic_items if item.text and any(
-        result.supported and evidence_signal(item.text, result.facet)[0]
+    requested_fact_supported = topic_present and (all(item.supported for item in facet_results) if facet_results else True)
+    direct_items = [item for item in topic_items if any(
+        result.supported and str(item.source_type) in _facet_source_types(understanding, route, result.facet)
+        and evidence_signal(_combined_text(item), result.facet)[0]
         for result in facet_results
     )]
-    if direct_items:
-        directness = "direct"
-    elif requested_fact_supported:
-        directness = "contextual"
-    else:
-        directness = "none"
+    directness = "direct" if direct_items else "contextual" if requested_fact_supported else "none"
 
-    independent_sources = len({
-        (item.source_type, item.source_name, item.source_ref)
-        for item in topic_items
-    })
+    independent_sources = len({item.independence_key or (str(item.source_type), item.source_name, item.source_ref) for item in topic_items})
     conflicts = _has_conflict(topic_items)
     freshness_satisfied = _freshness_satisfied(understanding, topic_items, now=now)
-    source_requirement_satisfied = _required_sources_satisfied(route, items)
+    source_requirement_satisfied = _required_sources_satisfied(route, topic_items)
 
     if not items:
         answerable, reason = False, "no_evidence"
     elif not topic_present:
         answerable, reason = False, "topic_missing"
-    elif not requested_fact_supported:
-        answerable, reason = False, "requested_fact_missing"
-    elif not freshness_satisfied:
-        answerable, reason = False, "freshness_requirement_not_met"
     elif not source_requirement_satisfied:
         answerable, reason = False, "required_source_missing"
+    elif not freshness_satisfied:
+        answerable, reason = False, "freshness_requirement_not_met"
+    elif not requested_fact_supported:
+        answerable, reason = False, "requested_fact_missing"
     else:
         answerable, reason = True, "requested_fact_supported"
 
     return RequestedFactCoverage(
-        topic_present=topic_present,
-        requested_facets=tuple(facet_results),
-        requested_fact_supported=requested_fact_supported,
-        evidence_directness=directness,
-        evidence_count=len(items),
-        independent_sources=independent_sources,
-        conflicts=conflicts,
-        freshness_satisfied=freshness_satisfied,
-        source_requirement_satisfied=source_requirement_satisfied,
-        answerable=answerable,
-        reason_code=reason,
+        topic_present=topic_present, requested_facets=tuple(facet_results),
+        requested_fact_supported=requested_fact_supported, evidence_directness=directness,
+        evidence_count=len(items), independent_sources=independent_sources, conflicts=conflicts,
+        freshness_satisfied=freshness_satisfied, source_requirement_satisfied=source_requirement_satisfied,
+        answerable=answerable, reason_code=reason,
     )
 
 
+def _facet_source_types(understanding: QuestionUnderstanding, route: SourceRoute, facet: str) -> set[str]:
+    required = {str(value) for value in route.required_sources}
+    if required == {SourceType.ARCHIVE}:
+        return {SourceType.ARCHIVE}
+    spec = facet_spec(facet)
+    if spec and (spec.requires_current_timestamp or spec.freshness_sensitivity == FreshnessClass.CURRENT):
+        return {str(value) for value in _CURRENT_AUTHORITY}
+    if facet == "regulation":
+        return {SourceType.OFFICIAL}
+    if understanding.scientific_evidence_needed or SourceType.SCIENTIFIC in required:
+        return {str(value) for value in _SCIENTIFIC_AUTHORITY}
+    if understanding.current_information_needed:
+        return {str(value) for value in _CURRENT_AUTHORITY}
+    return {str(item.source_type) for item in route.selected_sources if item.source_type != SourceType.NONE}
+
+
 def _topic_match(understanding: QuestionUnderstanding, item: EvidenceItem) -> bool:
-    text = normalize_text(_combined_text(item))
+    text = normalize_text(_combined_text(item)).casefold()
+    rare_anchors = _rare_unknown_anchors(understanding)
+    if rare_anchors and not all(_contains_term(text, anchor) for anchor in rare_anchors):
+        return False
     required = [entity for entity in understanding.entities if not entity.inferred and entity.entity_type not in {"career_stage"}]
+    # For contextual follow-ups, inferred recent entities are interpretation aids and
+    # may be used to test retrieval relevance, but never count as evidence themselves.
+    if not required:
+        required = [entity for entity in understanding.entities if entity.inferred and entity.entity_type not in {"career_stage", "profession"}]
     if not required:
         return bool(text)
     for entity in required:
-        variants = tuple(
-            normalize_text(value)
-            for value in (entity.canonical_label, entity.text, *entity.variants)
-            if normalize_text(value)
-        )
+        variants = tuple(normalize_text(value).casefold() for value in (entity.canonical_label, entity.text, *entity.variants) if normalize_text(value))
         if variants and not any(_contains_term(text, value) for value in variants):
             return False
     return True
@@ -117,6 +116,27 @@ def _combined_text(item: EvidenceItem) -> str:
     return "\n".join(value for value in (item.title, item.text, item.context) if value)
 
 
+def _rare_unknown_anchors(understanding: QuestionUnderstanding) -> tuple[str, ...]:
+    # Preserve synthetic/brand-like identifiers that the ontology does not yet
+    # know. A random paper about the broad facet must not authorize an answer
+    # about an unknown code such as zqv-99. Known entity tokens are excluded.
+    normalized = normalize_text(understanding.normalized_question).casefold()
+    known: set[str] = set()
+    for entity in understanding.entities:
+        for value in (entity.text, entity.canonical_label, *entity.variants):
+            known.update(re.findall(r"[a-z0-9]+", normalize_text(value).casefold()))
+    anchors: list[str] = []
+    for token in re.findall(r"[a-z][a-z0-9-]{2,}", normalized):
+        base = token.replace("-", "")
+        if token in known or base in known:
+            continue
+        # Identifier-like: contains a digit, or a consonant-only compact token.
+        if any(ch.isdigit() for ch in base) or (len(base) >= 3 and not any(vowel in base for vowel in "aeiou")):
+            if token not in anchors:
+                anchors.append(token)
+    return tuple(anchors[:3])
+
+
 def _contains_term(text: str, term: str) -> bool:
     if " " in term:
         return term in text
@@ -124,46 +144,56 @@ def _contains_term(text: str, term: str) -> bool:
 
 
 def _has_conflict(items: tuple[EvidenceItem, ...]) -> bool:
+    # Contrast words inside one article (for example «اما») are not evidence of
+    # inter-source disagreement. Require at least two independent evidence
+    # origins before surfacing a conflict signal.
+    independent = {item.independence_key or (str(item.source_type), item.source_name, item.source_ref) for item in items}
+    if len(independent) < 2:
+        return False
     joined = normalize_text("\n".join(_combined_text(item) for item in items)).casefold()
-    return any(normalize_text(marker) in joined for marker in _CONFLICT_MARKERS)
+    return any(normalize_text(marker).casefold() in joined for marker in _CONFLICT_MARKERS)
 
 
 def _required_sources_satisfied(route: SourceRoute, items: tuple[EvidenceItem, ...]) -> bool:
     present = {str(item.source_type) for item in items}
-    return all(source in present for source in route.required_sources)
+    return all(str(source) in present for source in route.required_sources)
 
 
-def _freshness_satisfied(
-    understanding: QuestionUnderstanding,
-    items: tuple[EvidenceItem, ...],
-    *,
-    now: datetime,
-) -> bool:
+def _freshness_satisfied(understanding: QuestionUnderstanding, items: tuple[EvidenceItem, ...], *, now: datetime) -> bool:
     if understanding.freshness not in {FreshnessClass.CURRENT, FreshnessClass.RECENT, FreshnessClass.REALTIME}:
         return True
-    for item in items:
-        if item.source_type in {SourceType.CURRENT_WEB, SourceType.OFFICIAL}:
-            if item.timestamp is None:
-                # Current-web adapters are obligated by their RetrievalRequest to
-                # enforce freshness before admitting evidence.
-                return True
-            parsed = _parse_timestamp(item.timestamp)
-            if parsed is not None and (now - parsed).days <= 180:
-                return True
-        parsed = _parse_timestamp(item.timestamp)
-        if parsed is not None and (now - parsed).days <= 180:
-            return True
-    return False
+    eligible = [item for item in items if item.source_type in _CURRENT_AUTHORITY | _SCIENTIFIC_AUTHORITY]
+    return any(_item_fresh_enough(understanding, None, item, now=now) for item in eligible)
+
+
+def _item_fresh_enough(understanding: QuestionUnderstanding, facet: str | None, item: EvidenceItem, *, now: datetime) -> bool:
+    spec = facet_spec(facet) if facet else None
+    needs_current = understanding.freshness in {FreshnessClass.CURRENT, FreshnessClass.REALTIME} or bool(spec and spec.requires_current_timestamp)
+    needs_recent = understanding.freshness == FreshnessClass.RECENT or bool(spec and spec.freshness_sensitivity == FreshnessClass.RECENT)
+    if not needs_current and not needs_recent:
+        return True
+    if needs_current and item.source_type not in _CURRENT_AUTHORITY:
+        return False
+    if bool(item.metadata.get("current_year_signal")) and needs_current:
+        return True
+    parsed = _parse_timestamp(item.timestamp)
+    if parsed is None:
+        return False
+    age_days = max(0, (now - parsed).days)
+    if understanding.freshness == FreshnessClass.REALTIME:
+        return age_days <= 7
+    if needs_current:
+        return age_days <= 180
+    if needs_recent:
+        return age_days <= 5 * 365
+    return True
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
     if not value:
         return None
     raw = str(value).strip().replace("Z", "+00:00")
-    for parser in (
-        lambda: datetime.fromisoformat(raw),
-        lambda: datetime.strptime(raw[:10], "%Y-%m-%d"),
-    ):
+    for parser in (lambda: datetime.fromisoformat(raw), lambda: datetime.strptime(raw[:10], "%Y-%m-%d")):
         try:
             parsed = parser()
             if parsed.tzinfo is None:

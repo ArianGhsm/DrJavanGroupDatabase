@@ -271,6 +271,13 @@ class EvidenceItem:
     metadata: dict[str, Any] = field(default_factory=dict)
     citation_capability: str = "direct"
     trust_tier: str = "unknown"
+    url: str | None = None
+    publication_year: int | None = None
+    publication_type: str | None = None
+    retrieved_at: str | None = None
+    trust_score: float | None = None
+    methodological_strength: float | None = None
+    independence_key: str | None = None
     contract_version: str = EVIDENCE_CONTRACT_VERSION
 
 

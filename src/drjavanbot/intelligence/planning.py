@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from drjavanbot.normalization import normalize_text
 from .models import (
     ConfidenceClass,
+    EntityMention,
     FreshnessClass,
     Geography,
     QuestionDomain,
@@ -16,6 +17,7 @@ from .models import (
     QUESTION_UNDERSTANDING_SCHEMA_VERSION,
 )
 from .model_policy import ModelDecision, ModelPolicy, ModelStage
+from .facets import FACET_BY_NAME
 from .understanding import QuestionContext, understand_question
 
 
@@ -54,9 +56,13 @@ class QuestionIntelligenceEngine:
         deterministic = understand_question(question, context=self.context)
         if self.provider is None:
             return deterministic, None, True
+        if not _requires_model_understanding(deterministic):
+            # High-confidence deterministic semantics avoid a network call. This
+            # is an intentional fast path, not a provider failure/fallback.
+            return deterministic, None, False
         decision = self.model_policy.select(
             ModelStage.QUESTION_UNDERSTANDING,
-            ambiguity=bool(deterministic.ambiguity),
+            ambiguity=any(item.resolved_to is None for item in deterministic.ambiguity),
             facet_count=len(deterministic.facets),
             mixed_language=deterministic.language_profile == "mixed",
             high_stakes=deterministic.safety_class in {"medication", "high_stakes"},
@@ -90,7 +96,9 @@ def parse_question_understanding(
     freshness = _enum_value(payload.get("freshness"), {item.value for item in FreshnessClass}, base.freshness)
     confidence = _enum_value(payload.get("confidence_class"), {item.value for item in ConfidenceClass}, base.confidence_class)
     safety = _enum_value(payload.get("safety_class"), {item.value for item in SafetyClass}, base.safety_class)
-    facets = _strings(payload.get("facets"), 16) or base.facets
+    model_facets = tuple(value for value in _strings(payload.get("facets"), 16) if value in FACET_BY_NAME)
+    facets = _canonical_facets(model_facets or base.facets)
+    entities = _parse_model_entities(payload.get("entities"), question=question, base=base.entities)
     geography_raw = payload.get("geography") if isinstance(payload.get("geography"), dict) else {}
     geography = Geography(
         country_code=_optional_text(geography_raw.get("country_code")) or base.geography.country_code,
@@ -103,6 +111,7 @@ def parse_question_understanding(
         domain=domain,
         subdomain=_optional_text(payload.get("subdomain")) or base.subdomain,
         intent=intent,
+        entities=entities,
         facets=facets,
         geography=geography,
         freshness=freshness,
@@ -115,7 +124,7 @@ def parse_question_understanding(
 
 
 def _augment_with_deterministic(model: QuestionUnderstanding, deterministic: QuestionUnderstanding) -> QuestionUnderstanding:
-    facets = tuple(dict.fromkeys((*model.facets, *deterministic.facets)))
+    facets = _canonical_facets(tuple(dict.fromkeys((*model.facets, *deterministic.facets))))
     entities = model.entities or deterministic.entities
     ambiguity = model.ambiguity or deterministic.ambiguity
     return replace(
@@ -127,6 +136,58 @@ def _augment_with_deterministic(model: QuestionUnderstanding, deterministic: Que
         scientific_evidence_needed=model.scientific_evidence_needed or deterministic.scientific_evidence_needed,
         current_information_needed=model.current_information_needed or deterministic.current_information_needed,
     )
+
+
+
+def _parse_model_entities(value: Any, *, question: str, base: tuple[EntityMention, ...]) -> tuple[EntityMention, ...]:
+    if not isinstance(value, list):
+        return base
+    normalized_question = normalize_text(question).casefold()
+    out = list(base)
+    existing = {item.canonical_id for item in out}
+    for raw in value[:10]:
+        if not isinstance(raw, dict):
+            continue
+        text = _optional_text(raw.get("text"))
+        canonical = _optional_text(raw.get("canonical")) or text
+        entity_type = _optional_text(raw.get("type")) or "dental_term"
+        if not text or not canonical:
+            continue
+        normalized_text = normalize_text(text).casefold()
+        # The model may normalize terminology, but may not introduce an entity that
+        # is absent from the actual user utterance. This blocks answer-fact leakage.
+        if normalized_text not in normalized_question:
+            continue
+        cid = normalize_text(canonical).casefold().replace(" ", "_")[:80]
+        if not cid or cid in existing:
+            continue
+        existing.add(cid)
+        out.append(EntityMention(
+            text=text, canonical_id=cid, canonical_label=canonical, entity_type=entity_type,
+            variants=(text, canonical), inferred=False, confidence=0.72,
+        ))
+    return tuple(out)
+
+
+
+def _requires_model_understanding(value: QuestionUnderstanding) -> bool:
+    unresolved = any(item.resolved_to is None for item in value.ambiguity)
+    return bool(
+        unresolved
+        or value.confidence_class == ConfidenceClass.LOW
+        or value.safety_class in {SafetyClass.MEDICATION, SafetyClass.HIGH_STAKES}
+        or len(value.facets) >= 3
+        or (value.language_profile == "mixed" and value.confidence_class != ConfidenceClass.HIGH)
+    )
+
+
+def _canonical_facets(values: tuple[str, ...]) -> tuple[str, ...]:
+    out = [value for value in values if value in FACET_BY_NAME]
+    # Prevalence questions often prompt a model to redundantly emit both
+    # prevalence and frequency. Keep the more specific requested-fact facet.
+    if "prevalence" in out and "frequency" in out:
+        out = [value for value in out if value != "frequency"]
+    return tuple(dict.fromkeys(out))
 
 
 def _enum_value(value: Any, allowed: set[str], default: str) -> str:

@@ -140,6 +140,28 @@ class BotStateStore:
             except (TypeError, json.JSONDecodeError): con.execute("DELETE FROM source_sessions WHERE session_id=?", (session_id,)); return None
             return list(payload) if isinstance(payload, list) else None
 
+    def get_conversation_context(self, user_id: int, *, ttl_seconds: int = 6 * 3600):
+        from drjavanbot.intelligence.conversation import ConversationQuestionContext
+        with self._connect() as con:
+            row = con.execute("SELECT payload_json,updated_at FROM conversation_semantics WHERE user_id=?", (int(user_id),)).fetchone()
+            if row is None:
+                return ConversationQuestionContext()
+            if float(row[1]) < time.time() - max(300, int(ttl_seconds)):
+                con.execute("DELETE FROM conversation_semantics WHERE user_id=?", (int(user_id),))
+                return ConversationQuestionContext()
+            try:
+                payload = json.loads(row[0])
+                if not isinstance(payload, dict): raise ValueError
+                return ConversationQuestionContext.from_dict(payload)
+            except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+                con.execute("DELETE FROM conversation_semantics WHERE user_id=?", (int(user_id),))
+                return ConversationQuestionContext()
+
+    def set_conversation_context(self, user_id: int, context) -> None:
+        payload = json.dumps(context.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        with self._connect() as con:
+            con.execute("INSERT INTO conversation_semantics(user_id,payload_json,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at", (int(user_id), payload, time.time()))
+
     def last_reindex_at(self) -> str | None: return self.get_setting("last_reindex_at")
     def set_last_reindex_at(self, value: str) -> None: self.set_setting("last_reindex_at", value)
     def provider_auth_failed(self) -> bool: return self.get_setting("provider_auth") == "failed"
@@ -147,7 +169,7 @@ class BotStateStore:
 
     def _prune_transient(self, con: sqlite3.Connection, now: float) -> None:
         cutoff = now - _STATE_RETENTION_SECONDS
-        con.execute("DELETE FROM update_claims WHERE status='done' AND updated_at<?", (cutoff,)); con.execute("DELETE FROM processed_updates WHERE created_at<?", (cutoff,)); con.execute("DELETE FROM rate_events WHERE created_at<?", (now - 60.0,)); con.execute("DELETE FROM source_sessions WHERE expires_at<=?", (now,)); con.execute("DELETE FROM owner_flows WHERE expires_at<=?", (now,))
+        con.execute("DELETE FROM update_claims WHERE status='done' AND updated_at<?", (cutoff,)); con.execute("DELETE FROM processed_updates WHERE created_at<?", (cutoff,)); con.execute("DELETE FROM rate_events WHERE created_at<?", (now - 60.0,)); con.execute("DELETE FROM source_sessions WHERE expires_at<=?", (now,)); con.execute("DELETE FROM owner_flows WHERE expires_at<=?", (now,)); con.execute("DELETE FROM conversation_semantics WHERE updated_at<?", (now - 6 * 3600,))
 
     def _ensure_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +186,7 @@ class BotStateStore:
             CREATE TABLE IF NOT EXISTS owner_flows(user_id INTEGER PRIMARY KEY,flow TEXT NOT NULL,expires_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS question_usage(id INTEGER PRIMARY KEY,created_at REAL NOT NULL,user_id INTEGER NOT NULL,success INTEGER NOT NULL,latency_ms REAL NOT NULL,cache_hit INTEGER NOT NULL,ai_calls INTEGER NOT NULL,error_class TEXT);
             CREATE TABLE IF NOT EXISTS source_sessions(session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,payload_json TEXT NOT NULL,expires_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS conversation_semantics(user_id INTEGER PRIMARY KEY,payload_json TEXT NOT NULL,updated_at REAL NOT NULL);
             """)
 
     def _connect(self) -> sqlite3.Connection:
