@@ -169,6 +169,7 @@ def _parse_model_entities(value: Any, *, question: str, base: tuple[EntityMentio
     return tuple(out)
 
 
+
 def _requires_model_understanding(value: QuestionUnderstanding) -> bool:
     unresolved = any(item.resolved_to is None for item in value.ambiguity)
     return bool(
