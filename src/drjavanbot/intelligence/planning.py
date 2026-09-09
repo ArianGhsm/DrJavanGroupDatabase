@@ -169,7 +169,6 @@ def _parse_model_entities(value: Any, *, question: str, base: tuple[EntityMentio
     return tuple(out)
 
 
-
 def _requires_model_understanding(value: QuestionUnderstanding) -> bool:
     unresolved = any(item.resolved_to is None for item in value.ambiguity)
     return bool(
@@ -177,7 +176,11 @@ def _requires_model_understanding(value: QuestionUnderstanding) -> bool:
         or value.confidence_class == ConfidenceClass.LOW
         or value.safety_class in {SafetyClass.MEDICATION, SafetyClass.HIGH_STAKES}
         or len(value.facets) >= 3
-        or (value.language_profile == "mixed" and value.confidence_class != ConfidenceClass.HIGH)
+        # Mixed script by itself is not ambiguity. Escalate only when the
+        # deterministic understanding is actually low-confidence; otherwise
+        # common Persian+English dental terms (e.max, RCT, etc.) stay on the
+        # deterministic zero-QI-call path.
+        or (value.language_profile == "mixed" and value.confidence_class == ConfidenceClass.LOW)
     )
 
 
