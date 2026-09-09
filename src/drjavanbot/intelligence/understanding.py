@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import unicodedata
 
 from drjavanbot.normalization import normalize_text, tokenize
 from .concepts import DentalConceptResolver
@@ -126,7 +127,13 @@ def understand_question(
 
 
 def _language_profile(raw: str) -> str:
-    has_fa = bool(re.search(r"[\u0600-\u06ff]", raw))
+    # Arabic-block punctuation/digits (for example the Persian question mark `؟`)
+    # are not language-bearing characters. Counting them as Persian turns terse
+    # English dental acronyms such as `RCT؟` into a false mixed-language query.
+    has_fa = any(
+        "\u0600" <= char <= "\u06ff" and unicodedata.category(char).startswith("L")
+        for char in raw
+    )
     has_en = bool(re.search(r"[A-Za-z]", raw))
     if has_fa and has_en:
         return LanguageProfile.MIXED
