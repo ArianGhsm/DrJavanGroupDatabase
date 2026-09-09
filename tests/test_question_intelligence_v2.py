@@ -93,3 +93,27 @@ def test_model_facets_are_ontology_locked_and_redundant_frequency_is_collapsed()
     }
     u=parse_question_understanding(json.dumps(payload),question="most common odontogenic cyst?")
     assert u.facets == ("prevalence",)
+
+
+def test_terse_english_acronym_with_persian_punctuation_stays_deterministic_archive():
+    class MustNotRun:
+        def generate_json(self, **_kwargs):
+            raise AssertionError("QI model must not run for deterministic RCT lookup")
+
+    understood, decision, fallback = QuestionIntelligenceEngine(provider=MustNotRun()).understand("RCT؟")
+    assert understood.language_profile == "english"
+    assert decision is None and fallback is False
+    assert route_sources(understood).required_sources == (SourceType.ARCHIVE,)
+
+
+def test_simple_mixed_archive_lookup_does_not_escalate_to_qi_model():
+    class MustNotRun:
+        def generate_json(self, **_kwargs):
+            raise AssertionError("QI model must not run for deterministic archive lookup")
+
+    understood, decision, fallback = QuestionIntelligenceEngine(provider=MustNotRun()).understand(
+        "گروه درباره e.max چی گفته؟"
+    )
+    assert understood.language_profile == "mixed"
+    assert decision is None and fallback is False
+    assert route_sources(understood).required_sources == (SourceType.ARCHIVE,)
