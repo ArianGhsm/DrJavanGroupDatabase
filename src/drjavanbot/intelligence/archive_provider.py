@@ -7,6 +7,7 @@ from drjavanbot.ai.query_model import EvidencePattern, FamilyPurpose, SearchFami
 from drjavanbot.ai.retrieval import retrieve_with_plan
 from drjavanbot.ai.search_policy import derive_retrieval_policy
 from drjavanbot.search import SQLiteSearchBackend
+from .facets import evidence_signal
 from .models import EvidenceItem, RetrievalRequest, RetrievalResult, SourceType
 
 
@@ -23,7 +24,7 @@ class ArchiveRetrievalProvider:
         started = time.perf_counter()
         report = retrieve_with_plan(self.backend, plan, evidence_limit=max(12, min(request.top_k, 60)))
         latency = (time.perf_counter() - started) * 1000.0
-        items = tuple(_evidence_item(candidate, rank) for rank, candidate in enumerate(report.candidates[:request.top_k], start=1))
+        items = _evidence_items(report.candidates, request)
         return RetrievalResult(
             source_type=SourceType.ARCHIVE,
             items=items,
@@ -125,6 +126,65 @@ def _evidence_item(candidate, rank: int) -> EvidenceItem:
             "cluster_size": candidate.cluster_size,
             "context_count": len(candidate.context),
         },
+        citation_capability="message_id_exact_quote",
+        trust_tier="community_archive",
+    )
+
+
+def _evidence_items(candidates, request: RetrievalRequest) -> tuple[EvidenceItem, ...]:
+    """Materialize both discussion anchors and useful reply/context messages.
+
+    Retrieval v2 hydrates a winning discussion into ``candidate.context``. The
+    old provider exposed only the anchor as citable evidence, so synthesis could
+    see a recommendation in context but was forbidden to cite or use it. Each
+    promoted context message keeps its own source locator and message id.
+    """
+    primaries = [
+        _evidence_item(candidate, rank)
+        for rank, candidate in enumerate(candidates[:request.top_k], start=1)
+    ]
+    promoted: list[EvidenceItem] = []
+    seen = {item.source_ref for item in primaries}
+    for rank, candidate in enumerate(candidates[:request.top_k], start=1):
+        parent = primaries[rank - 1]
+        for message in tuple(getattr(candidate, "context", ()) or ())[:8]:
+            if getattr(message, "is_service", False) or not str(getattr(message, "text_raw", "")).strip():
+                continue
+            if not _context_is_promotable(message.text_raw, request.facets):
+                continue
+            source_ref = message.source_locator or f"{message.source_file}#p{message.source_page}o{message.source_order}"
+            if source_ref in seen:
+                continue
+            seen.add(source_ref)
+            promoted.append(_message_evidence_item(
+                message,
+                rank=rank,
+                retrieval_score=max(0.0, float(candidate.local_score) - 0.01),
+                parent_evidence_id=parent.evidence_id,
+            ))
+    limit = max(request.top_k, min(request.top_k * 3, 60))
+    return tuple((*primaries, *promoted)[:limit])
+
+
+def _context_is_promotable(text: str, facets: tuple[str, ...]) -> bool:
+    requested = tuple(facet for facet in facets if facet not in {"product", "material"})
+    return bool(requested) and any(evidence_signal(text, facet)[0] for facet in requested)
+
+
+def _message_evidence_item(message, *, rank: int, retrieval_score: float, parent_evidence_id: str) -> EvidenceItem:
+    message_id = message.message_id if message.message_id is not None else f"p{message.source_page}o{message.source_order}"
+    timestamp = message.datetime.isoformat() if getattr(message, "datetime", None) is not None else message.datetime_raw
+    return EvidenceItem(
+        evidence_id=f"archive:{message_id}",
+        source_type=SourceType.ARCHIVE,
+        source_name="DrJavan Telegram Archive",
+        source_ref=message.source_locator or f"{message.source_file}#p{message.source_page}o{message.source_order}",
+        text=message.text_raw,
+        title="Telegram discussion reply",
+        timestamp=timestamp,
+        author_or_org=message.author,
+        retrieval_score=retrieval_score,
+        metadata={"rank": rank, "promoted_from_context": parent_evidence_id},
         citation_capability="message_id_exact_quote",
         trust_tier="community_archive",
     )

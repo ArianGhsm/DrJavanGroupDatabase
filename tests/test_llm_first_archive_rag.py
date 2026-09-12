@@ -2,6 +2,7 @@ import json
 
 from drjavanbot.ai.config import AIConfig
 from drjavanbot.intelligence.answerability import assess_requested_fact_coverage
+from drjavanbot.intelligence.archive_provider import _context_is_promotable
 from drjavanbot.intelligence.facets import detect_facets
 from drjavanbot.intelligence.model_policy import ModelPolicy
 from drjavanbot.intelligence.models import (
@@ -153,3 +154,14 @@ def test_unqualified_or_recall_hits_do_not_manufacture_family_coverage():
     )
 
     assert relevant.base_score > noisy.base_score
+
+
+def test_recommendation_reply_is_promoted_as_independently_citable_evidence():
+    assert _context_is_promotable(
+        "کاریزما کلاسیک کار کردم و راضی‌ام؛ از توکویاما هم راضی‌ام.",
+        ("recommendation", "product"),
+    )
+    assert not _context_is_promotable(
+        "این فقط یک پیام عمومی درباره کامپوزیت است.",
+        ("recommendation", "product"),
+    )
