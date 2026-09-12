@@ -28,6 +28,7 @@ Output ONLY this compact shape: {{"claims":[{{"text":"...","support_ids":["s001"
 Use 1-4 claim objects. claims[0] is the direct answer. Do not output direct_answer, quotes, source labels, confidence, counts, limitations, or other presentation fields.
 Every factual detail in each claim must be supported by the selected support_ids. support_ids must be copied exactly from supplied spans; never invent an ID.
 Do not use model memory as factual authority. Never turn Telegram/community opinion into scientific truth or a current estimate into a timeless fact.
+For recommendation or comparison questions, claims[0] must answer the requested choice directly. If evidence names products and reports experience or tradeoffs, name those supported products and summarize those tradeoffs; do not replace the answer with a generic caveat. A source message that only asks a question is not an answer.
 For explicit hybrid requests, include grounded claims covering every required source class. For salary/cost, the direct answer must include the supported amount/range, currency/unit, evidence year/date, and cautious wording tied to the source.
 Answer in the user's language. Keep claims concise. Do not expose hidden reasoning.'''
 
