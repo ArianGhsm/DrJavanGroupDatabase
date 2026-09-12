@@ -194,6 +194,24 @@ def _archive_queries(understanding: QuestionUnderstanding) -> tuple[RetrievalQue
         if topical:
             out.append(RetrievalQuery(topical, "topic", "topic", 100, True, True))
     topic_seed = next((item.text for item in out if item.anchor), "")
+    native_topic_seed = next(
+        (item.text for item in out if item.anchor and _contains_persian(item.text)),
+        topic_seed,
+    )
+    facets = set(understanding.facets)
+    if native_topic_seed and "recommendation" in facets and facets & {"product", "material"}:
+        # Recommendation discussions often begin with a question and put the
+        # named products in replies. Give the retriever natural, high-signal
+        # phrasings so it can recover that discussion cluster instead of merely
+        # ranking every message that contains the broad material name.
+        for text in (
+            f"چه برند {native_topic_seed} پیشنهاد",
+            f"{native_topic_seed} برند خوب",
+            f"{native_topic_seed} راضی",
+        ):
+            out.append(RetrievalQuery(
+                text, "practical_recommendation", "intersection", 99, True, False
+            ))
     for facet in understanding.facets[:5]:
         spec = facet_spec(facet)
         if spec is None:
@@ -215,6 +233,10 @@ def _is_generic_archive_filter_entity(entity) -> bool:
         if normalize_text(value)
     }
     return bool(values) and values <= generic
+
+
+def _contains_persian(value: str) -> bool:
+    return any("\u0600" <= char <= "\u06ff" for char in value)
 
 
 def _dedupe(values: list[RetrievalQuery]) -> tuple[RetrievalQuery, ...]:

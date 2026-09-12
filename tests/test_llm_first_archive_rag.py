@@ -123,3 +123,13 @@ def test_generic_brand_entity_is_not_a_mandatory_archive_topic_anchor():
         for query in request.queries
         if query.family == "intersection_recommendation"
     )
+    practical = {
+        query.text
+        for query in request.queries
+        if query.family == "practical_recommendation"
+    }
+    assert practical == {
+        "چه برند کامپوزیت پیشنهاد",
+        "کامپوزیت برند خوب",
+        "کامپوزیت راضی",
+    }
