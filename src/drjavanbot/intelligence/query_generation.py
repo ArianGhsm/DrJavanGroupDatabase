@@ -163,6 +163,7 @@ def _knowledge_queries(understanding: QuestionUnderstanding) -> tuple[RetrievalQ
 
 def _archive_queries(understanding: QuestionUnderstanding) -> tuple[RetrievalQuery, ...]:
     out: list[RetrievalQuery] = []
+    seen_topic_terms: set[str] = set()
     for index, entity in enumerate(understanding.entities[:4]):
         if entity.inferred and entity.entity_type in {"profession", "career_stage"}:
             continue
@@ -175,6 +176,14 @@ def _archive_queries(understanding: QuestionUnderstanding) -> tuple[RetrievalQue
         if _is_generic_archive_filter_entity(entity):
             continue
         variants = tuple(dict.fromkeys(normalize_text(value) for value in (entity.canonical_label, entity.text, *entity.variants) if normalize_text(value)))
+        normalized_variants = {value.casefold() for value in variants}
+        # QI may return a normalized material entity in addition to the
+        # deterministic ontology entity (for example composite and
+        # dental_composite). They are aliases, not two independently required
+        # topics. Requiring both made Persian discussions fail retrieval.
+        if seen_topic_terms & normalized_variants:
+            continue
+        seen_topic_terms.update(normalized_variants)
         for variant in variants[:4]:
             out.append(RetrievalQuery(variant, f"topic_{index}_{entity.canonical_id}", "topic", 100 - index, True, True))
     if not any(item.anchor for item in out):

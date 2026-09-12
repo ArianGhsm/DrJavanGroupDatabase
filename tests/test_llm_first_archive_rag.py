@@ -117,3 +117,4 @@ def test_generic_brand_entity_is_not_a_mandatory_archive_topic_anchor():
     topic_families = {query.family for query in request.queries if query.purpose == "topic"}
     assert not any("brand" in family for family in topic_families)
     assert any("composite" in family for family in topic_families)
+    assert len(topic_families) == 1
