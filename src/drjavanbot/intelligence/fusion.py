@@ -62,11 +62,13 @@ class MultiSourceEvidenceFusion:
             fused = 0.44 * topic + 0.24 * trust + 0.15 * freshness + 0.17 * source_score
         if set(route.required_sources) == {SourceType.ARCHIVE}:
             fused = min(1.0, fused + 0.22) if item.source_type == SourceType.ARCHIVE else fused * 0.32
+        if item.source_type == SourceType.ARCHIVE and set(understanding.facets) & {"recommendation", "comparison"}:
+            fused += _archive_answer_signal(item.text or "")
         return RankedEvidence(item, topic, fact, trust, freshness, source_score, max(0.0, min(fused, 1.0)))
 
 
 def _topic_relevance(understanding: QuestionUnderstanding, item: EvidenceItem) -> float:
-    text = normalize_text("\n".join(value for value in (item.title, item.text, item.context) if value)).casefold()
+    text = normalize_text(_scoring_text(item)).casefold()
     entities = [entity for entity in understanding.entities if not entity.inferred and entity.entity_type != "career_stage"]
     if not entities:
         return 0.78 if text else 0.0
@@ -81,9 +83,36 @@ def _topic_relevance(understanding: QuestionUnderstanding, item: EvidenceItem) -
 def _fact_relevance(understanding: QuestionUnderstanding, item: EvidenceItem) -> float:
     if not understanding.facets:
         return 0.75
-    text = "\n".join(value for value in (item.title, item.text, item.context) if value)
-    scores = [evidence_signal(text, facet)[1] for facet in understanding.facets]
+    text = _scoring_text(item)
+    facets = tuple(understanding.facets)
+    if set(facets) & {"recommendation", "comparison"}:
+        facets = tuple(facet for facet in facets if facet not in {"product", "material"})
+    scores = [evidence_signal(text, facet)[1] for facet in facets]
     return sum(scores) / max(1, len(scores))
+
+
+def _scoring_text(item: EvidenceItem) -> str:
+    # Archive context is a collection of other messages with different source
+    # locators. It is promoted separately by ArchiveRetrievalProvider, so using
+    # it here would attribute a reply's relevance to the original question.
+    values = (item.title, item.text) if item.source_type == SourceType.ARCHIVE else (item.title, item.text, item.context)
+    return "\n".join(value for value in values if value)
+
+
+def _archive_answer_signal(text: str) -> float:
+    normalized = normalize_text(text).casefold()
+    request_cues = (
+        "کدوم", "کدام", "چه برند", "معرفی کنید", "پیشنهاد میدین",
+        "پیشنهاد می دید", "ممنون میشم", "نظرتون چیه", "which", "recommend?",
+    )
+    experience_cues = (
+        "کار کردم", "استفاده کردم", "راضی", "تجربه", "ترجیح", "عالی",
+        "بهتره", "خوب بود", "پیشنهادم", "i use", "used", "satisfied",
+    )
+    signal = 0.16 if any(cue in normalized for cue in experience_cues) else 0.0
+    if any(cue in normalized for cue in request_cues) or "?" in text or "؟" in text:
+        signal -= 0.22
+    return signal
 
 
 def _trust_from_tier(tier: str) -> float:

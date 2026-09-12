@@ -4,6 +4,7 @@ from drjavanbot.ai.config import AIConfig
 from drjavanbot.intelligence.answerability import assess_requested_fact_coverage
 from drjavanbot.intelligence.archive_provider import _context_is_promotable
 from drjavanbot.intelligence.facets import detect_facets
+from drjavanbot.intelligence.fusion import MultiSourceEvidenceFusion
 from drjavanbot.intelligence.model_policy import ModelPolicy
 from drjavanbot.intelligence.models import (
     EvidenceItem,
@@ -165,3 +166,25 @@ def test_recommendation_reply_is_promoted_as_independently_citable_evidence():
         "این فقط یک پیام عمومی درباره کامپوزیت است.",
         ("recommendation", "product"),
     )
+
+
+def test_recommendation_answer_outranks_the_question_that_requested_it():
+    understanding = understand_question(QUESTION)
+    route = route_sources(understanding)
+    question = EvidenceItem(
+        evidence_id="archive:q", source_type=SourceType.ARCHIVE,
+        source_name="group", source_ref="messages.html#q",
+        text="چه برند کامپوزیتی پیشنهاد میدین؟",
+        author_or_org="member-q", trust_tier="community_archive",
+    )
+    answer = EvidenceItem(
+        evidence_id="archive:a", source_type=SourceType.ARCHIVE,
+        source_name="group", source_ref="messages.html#a",
+        text="کاریزما کلاسیک کار کردم و راضی‌ام؛ از توکویاما هم راضی‌ام.",
+        author_or_org="member-a", trust_tier="community_archive",
+    )
+
+    ranked = MultiSourceEvidenceFusion().rerank(
+        understanding, route, (question, answer)
+    )
+    assert ranked[0].item.evidence_id == "archive:a"
