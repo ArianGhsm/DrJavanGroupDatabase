@@ -166,6 +166,14 @@ def _archive_queries(understanding: QuestionUnderstanding) -> tuple[RetrievalQue
     for index, entity in enumerate(understanding.entities[:4]):
         if entity.inferred and entity.entity_type in {"profession", "career_stage"}:
             continue
+        # Words such as "brand/product" describe the requested answer shape;
+        # they are not dental topic anchors.  Treating an LLM-extracted generic
+        # "brand" entity as mandatory made otherwise relevant composite
+        # discussions fail the co-location gate unless they repeated that exact
+        # word.  Named products remain anchors; only generic class labels move to
+        # the facet family below.
+        if _is_generic_archive_filter_entity(entity):
+            continue
         variants = tuple(dict.fromkeys(normalize_text(value) for value in (entity.canonical_label, entity.text, *entity.variants) if normalize_text(value)))
         for variant in variants[:4]:
             out.append(RetrievalQuery(variant, f"topic_{index}_{entity.canonical_id}", "topic", 100 - index, True, True))
@@ -183,6 +191,18 @@ def _archive_queries(understanding: QuestionUnderstanding) -> tuple[RetrievalQue
         if topic_seed and spec.evidence_markers:
             out.append(RetrievalQuery(f"{topic_seed} {spec.evidence_markers[0]}", f"intersection_{facet}", "intersection", 94, True, False))
     return _dedupe(out)
+
+
+def _is_generic_archive_filter_entity(entity) -> bool:
+    if str(entity.entity_type).casefold() not in {"product", "brand"}:
+        return False
+    generic = {"brand", "product", "برند", "مارک", "محصول"}
+    values = {
+        normalize_text(value).casefold()
+        for value in (entity.text, entity.canonical_id, entity.canonical_label)
+        if normalize_text(value)
+    }
+    return bool(values) and values <= generic
 
 
 def _dedupe(values: list[RetrievalQuery]) -> tuple[RetrievalQuery, ...]:

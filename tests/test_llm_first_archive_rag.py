@@ -13,6 +13,7 @@ from drjavanbot.intelligence.models import (
     SourceType,
 )
 from drjavanbot.intelligence.planning import QuestionIntelligenceEngine
+from drjavanbot.intelligence.query_generation import generate_retrieval_requests
 from drjavanbot.intelligence.routing import route_sources
 from drjavanbot.intelligence.synthesis import _use_deterministic_archive_path
 from drjavanbot.intelligence.understanding import understand_question
@@ -102,3 +103,17 @@ def test_plain_terse_archive_lookup_keeps_fast_deterministic_path():
 
 def test_recommendation_evidence_accepts_natural_experience_language():
     assert detect_facets(QUESTION) == ("recommendation", "product")
+
+
+def test_generic_brand_entity_is_not_a_mandatory_archive_topic_anchor():
+    provider = _QIProvider()
+    understanding, _, _ = QuestionIntelligenceEngine(
+        provider=provider, model_policy=ModelPolicy()
+    ).understand(QUESTION)
+    request = generate_retrieval_requests(
+        understanding, route_sources(understanding)
+    )[0]
+
+    topic_families = {query.family for query in request.queries if query.purpose == "topic"}
+    assert not any("brand" in family for family in topic_families)
+    assert any("composite" in family for family in topic_families)
