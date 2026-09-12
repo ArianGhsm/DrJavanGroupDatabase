@@ -23,6 +23,12 @@ def route_sources(understanding: QuestionUnderstanding) -> SourceRoute:
         "فقط از گروه", "فقط تو گروه", "فقط در گروه", "فقط آرشیو",
         "only from group", "group only", "archive only",
     ))
+    practical_archive = bool(
+        not understanding.current_information_needed
+        and not understanding.scientific_evidence_needed
+        and str(understanding.intent) == "recommendation"
+        and bool(facets & {"product", "material"})
+    )
     if archive_only:
         add(SourceType.ARCHIVE, 100, SourceRequirement.REQUIRED, FreshnessClass.UNSPECIFIED,
             "explicit_archive_only", "discussion_graph_with_concept_and_facet_queries")
@@ -30,6 +36,9 @@ def route_sources(understanding: QuestionUnderstanding) -> SourceRoute:
     if explicit_archive:
         add(SourceType.ARCHIVE, 100, SourceRequirement.REQUIRED, FreshnessClass.UNSPECIFIED,
             "archive_opinion_request", "discussion_graph_with_concept_and_facet_queries")
+    elif practical_archive:
+        add(SourceType.ARCHIVE, 100, SourceRequirement.REQUIRED, FreshnessClass.UNSPECIFIED,
+            "practical_archive_recommendation", "discussion_graph_with_concept_and_facet_queries")
 
     if understanding.current_information_needed:
         official_required = bool(facets & {"regulation"})

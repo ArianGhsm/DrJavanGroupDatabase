@@ -26,7 +26,16 @@ def assess_requested_fact_coverage(
     topic_present = bool(topic_items)
 
     facet_results: list[FacetCoverage] = []
-    for facet in understanding.facets:
+    requested_facets = tuple(understanding.facets)
+    # In a recommendation/comparison question, product/material identifies the
+    # object class (for example “brand of composite”), while the requested fact
+    # is the evaluation. Requiring the literal word “brand” in an archive reply
+    # rejected useful messages that simply named a product and said it was good.
+    if set(requested_facets) & {"recommendation", "comparison"}:
+        requested_facets = tuple(
+            facet for facet in requested_facets if facet not in {"product", "material"}
+        )
+    for facet in requested_facets:
         allowed = _facet_source_types(understanding, route, facet)
         candidates = tuple(item for item in topic_items if str(item.source_type) in allowed and _item_fresh_enough(understanding, facet, item, now=now))
         best = (False, 0.0, "facet_semantic_signal_missing")

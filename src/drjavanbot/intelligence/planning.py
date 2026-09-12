@@ -30,7 +30,9 @@ Schema version: {QUESTION_UNDERSTANDING_SCHEMA_VERSION}
 Compact shape:
 {{"schema_version":"{QUESTION_UNDERSTANDING_SCHEMA_VERSION}","domain":"dentistry|career_economics|regulation|general|unknown","subdomain":null,"intent":"factual|definition|classification|comparison|recommendation|diagnosis|differential_diagnosis|treatment|technique|career|regulatory|archive_opinion|current_information|hybrid|unknown","entities":[{{"text":"...","canonical":"...","type":"..."}}],"facets":["..."],"constraints":{{"population":[],"temporal":[],"comparison_targets":[],"career_stage":[],"profession":[]}},"geography":{{"country_code":null,"label":null,"explicit":false}},"freshness":"evergreen|recent|current|realtime|unspecified","archive_specific":false,"scientific_evidence_needed":false,"current_information_needed":false,"ambiguity":[{{"kind":"...","span":"...","candidates":["..."],"resolved_to":null}}],"confidence_class":"high|medium|low","safety_class":"general|clinical|medication|high_stakes"}}
 Use requested-fact facets, not generic question words. For example, commonness/prevalence wording is a prevalence/frequency facet; "which" alone is not a recommendation.
-For current salary/cost/market/regulatory questions set current_information_needed=true. For explicit group/archive-opinion questions set archive_specific=true. For standard evergreen dentistry facts prefer scientific_evidence_needed=true unless the request is explicitly archive-only."""
+For current salary/cost/market/regulatory questions set current_information_needed=true. For explicit group/archive-opinion questions set archive_specific=true.
+Practical product/material/brand recommendations, user-experience questions and "which one is good/better" questions should use the privileged archive unless the user explicitly asks for scientific evidence, a guideline, or current market information. In those cases set archive_specific=true and scientific_evidence_needed=false.
+For standard evergreen dentistry facts prefer scientific_evidence_needed=true unless the request is explicitly archive-only."""
 
 
 class IntelligenceModelProvider(Protocol):
@@ -176,6 +178,12 @@ def _requires_model_understanding(value: QuestionUnderstanding) -> bool:
         unresolved
         or value.confidence_class == ConfidenceClass.LOW
         or value.safety_class in {SafetyClass.MEDICATION, SafetyClass.HIGH_STAKES}
+        # Practical recommendations and comparisons are semantically ambiguous:
+        # they may ask for group experience, scientific efficacy, or a current
+        # market choice.  The old deterministic fast path routinely sent brand
+        # questions to generic PubMed retrieval, so these intents are LLM-first.
+        or value.intent in {QuestionIntent.RECOMMENDATION, QuestionIntent.COMPARISON}
+        or bool(set(value.facets) & {"recommendation", "comparison", "product", "material"})
         or len(value.facets) >= 3
         # Mixed script by itself is not ambiguity. Escalate only when the
         # deterministic understanding is actually low-confidence; otherwise

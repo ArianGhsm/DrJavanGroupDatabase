@@ -135,6 +135,8 @@ def _use_deterministic_archive_path(understanding: QuestionUnderstanding, route:
     return (
         required == {SourceType.ARCHIVE}
         and len(understanding.facets) <= 1
+        and str(understanding.intent) not in {"recommendation", "comparison"}
+        and not set(understanding.facets) & {"recommendation", "comparison", "product", "material"}
         and str(understanding.safety_class) not in {"medication", "high_stakes"}
         and not understanding.ambiguity
     )

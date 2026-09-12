@@ -77,7 +77,7 @@ FACET_SPECS: tuple[FacetSpec, ...] = (
     _s("timing", ("چه زمانی", "چه موقع", "زمان", "when", "timing"), ("زمان", "قبل", "بعد", "when", "timing", "before", "after"), shape="temporal"),
     _s("duration", ("مدت", "چقدر طول", "duration", "how long"), ("مدت", "روز", "هفته", "ماه", "duration", "day", "week", "month"), shape="duration", numeric=True),
     _s("comparison", ("مقایسه", "در مقایسه", "vs", "versus", "کدوم بهتر", "کدام بهتر"), ("بهتر", "کمتر", "بیشتر", "مقایسه", "versus", "vs", "compared"), shape="comparative"),
-    _s("recommendation", ("پیشنهاد", "توصیه", "بهترین", "خوبه", "خوب است", "recommend", "recommended", "best", "is it good"), ("پیشنهاد", "توصیه", "بهترین", "recommend", "recommended", "prefer"), shape="recommendation", affinity=_ARCHIVE_FRIENDLY),
+    _s("recommendation", ("پیشنهاد", "توصیه", "بهترین", "خوبه", "خوب است", "recommend", "recommended", "best", "is it good"), ("پیشنهاد", "توصیه", "بهترین", "خوب", "عالی", "راضی", "بد نیست", "جواب داده", "کار کردم", "recommend", "recommended", "prefer", "good", "great", "satisfied"), shape="recommendation", affinity=_ARCHIVE_FRIENDLY),
     _s("prognosis", ("پیش آگهی", "پروگنوز", "prognosis", "outcome"), ("پیش آگهی", "پروگنوز", "prognosis", "outcome", "موفقیت"), shape="outcome"),
     _s("recurrence", ("عود", "عودش", "recurrence", "recur"), ("عود", "recurrence", "recur", "عود می"), shape="outcome"),
     _s("complication", ("عارضه", "عوارض", "complication", "adverse"), ("عارضه", "عوارض", "complication", "adverse"), shape="adverse_outcome"),
