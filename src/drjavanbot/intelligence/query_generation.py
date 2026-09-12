@@ -175,7 +175,10 @@ def _archive_queries(understanding: QuestionUnderstanding) -> tuple[RetrievalQue
         # the facet family below.
         if _is_generic_archive_filter_entity(entity):
             continue
-        variants = tuple(dict.fromkeys(normalize_text(value) for value in (entity.canonical_label, entity.text, *entity.variants) if normalize_text(value)))
+        # Preserve the user's surface form first. The archive is predominantly
+        # Persian; choosing an English canonical label as the intersection seed
+        # produced mixed-script queries and buried the relevant discussions.
+        variants = tuple(dict.fromkeys(normalize_text(value) for value in (entity.text, entity.canonical_label, *entity.variants) if normalize_text(value)))
         normalized_variants = {value.casefold() for value in variants}
         # QI may return a normalized material entity in addition to the
         # deterministic ontology entity (for example composite and

@@ -118,3 +118,8 @@ def test_generic_brand_entity_is_not_a_mandatory_archive_topic_anchor():
     assert not any("brand" in family for family in topic_families)
     assert any("composite" in family for family in topic_families)
     assert len(topic_families) == 1
+    assert any(
+        query.text == "کامپوزیت پیشنهاد"
+        for query in request.queries
+        if query.family == "intersection_recommendation"
+    )
