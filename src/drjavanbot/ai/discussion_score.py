@@ -18,8 +18,8 @@ def _make_discussion(
     anchor_exists: bool = False,
 ) -> DiscussionCandidate:
     values = tuple(states)
-    family_names = set().union(*(state.families for state in values)) if values else set()
     qualified_families = set().union(*(state.qualified_families for state in values)) if values else set()
+    family_names = set().union(*(state.families for state in values)) if values else set()
     present_anchors = (
         set().union(*(state.families for state in values if state.topic_anchor))
         if anchored else set()
@@ -76,9 +76,9 @@ def _make_discussion(
     if required_groups and required_hit >= len(required_groups) and present_anchors:
         score += 0.85
         reasons.add("discussion_facet_complete")
-    if len(family_names) > 1:
-        score += 0.24 * min(4, len(family_names) - 1)
-        reasons.add(f"discussion_family_coverage:{len(family_names)}")
+    if len(qualified_families) > 1:
+        score += 0.24 * min(4, len(qualified_families) - 1)
+        reasons.add(f"discussion_family_coverage:{len(qualified_families)}")
     if present_anchors and facet_families:
         # Legacy name: this now means a facet family was actually co-located
         # inside a topic-anchored discussion, not merely somewhere nearby globally.

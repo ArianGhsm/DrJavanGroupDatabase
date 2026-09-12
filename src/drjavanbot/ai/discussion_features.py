@@ -20,8 +20,8 @@ def _candidate_from_state(
 ) -> EvidenceCandidate:
     reasons = set(state.match_reasons)
     reasons.update(extra_reasons)
-    reasons.add(f"family_coverage:{len(state.family_hits)}")
-    for family in state.family_hits:
+    reasons.add(f"family_coverage:{len(state.qualified_families)}")
+    for family in state.qualified_families:
         reasons.add(f"hit_family:{family}")
     return replace(
         state.candidate,

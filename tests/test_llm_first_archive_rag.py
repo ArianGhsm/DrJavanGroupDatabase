@@ -17,6 +17,7 @@ from drjavanbot.intelligence.query_generation import generate_retrieval_requests
 from drjavanbot.intelligence.routing import route_sources
 from drjavanbot.intelligence.synthesis import _use_deterministic_archive_path
 from drjavanbot.intelligence.understanding import understand_question
+from drjavanbot.ai.discussion_types import _FamilyHit, _HitState
 
 
 QUESTION = "کدوم برند کامپوزیت خوبه؟"
@@ -133,3 +134,22 @@ def test_generic_brand_entity_is_not_a_mandatory_archive_topic_anchor():
         "کامپوزیت برند خوب",
         "کامپوزیت راضی",
     }
+
+
+def test_unqualified_or_recall_hits_do_not_manufacture_family_coverage():
+    qualified = _FamilyHit(1, 0.98, 1.0, 6.0, True)
+    unqualified = _FamilyHit(1, 0.98, 1.0, 3.8, False)
+    noisy = _HitState(
+        candidate=None,
+        family_hits={"topic": qualified, **{f"noise_{i}": unqualified for i in range(6)}},
+        matched_terms=set(),
+        match_reasons={"fts_bm25"},
+    )
+    relevant = _HitState(
+        candidate=None,
+        family_hits={"topic": qualified, "recommendation": qualified},
+        matched_terms=set(),
+        match_reasons={"exact_phrase"},
+    )
+
+    assert relevant.base_score > noisy.base_score

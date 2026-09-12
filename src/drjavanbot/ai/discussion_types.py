@@ -70,12 +70,20 @@ class _HitState:
     def base_score(self) -> float:
         if not self.family_hits:
             return 0.0
-        values = tuple(self.family_hits.values())
+        qualified = tuple(item for item in self.family_hits.values() if item.qualified)
+        # Each SQLite query also has a bounded OR-recall pass. A document that
+        # merely contains one broad token can therefore appear in many query
+        # families without satisfying those queries. The old scorer counted all
+        # of those appearances as independent semantic coverage, allowing noisy
+        # topic-only messages to outrank exact multi-facet discussions.
+        values = qualified or tuple(self.family_hits.values())
         best_norm = max(item.local_norm for item in values)
         rrf_sum = min(3.0, sum(item.rrf for item in values))
         best_local = max(item.local_score for item in values)
         score = 2.35 * best_norm + 0.95 * rrf_sum + 0.09 * min(max(best_local, 0.0), 10.0)
         score += 0.20 * min(3, max(0, len(values) - 1))
+        if not qualified:
+            score *= 0.55
         if "exact_phrase" in self.match_reasons:
             score += 0.42
         elif "normalized_tokens" in self.match_reasons:
