@@ -80,7 +80,9 @@ def rebuild_discussions(connection: sqlite3.Connection) -> DiscussionBuildReport
             text = "\n".join(value for value in texts if value)[:_MAX_TEXT_CHARS]
             authors = {rows[i][5] for i in chunk if rows[i][5]}
             stamps = [rows[i][4] for i in chunk if rows[i][4]]
-            key = root_key if len(chunks) == 1 else f"{root_key}.{chunk_index + 1}"
+            # The first chunk always keeps the bare key, so a discussion that
+            # grows past MAX_CHUNK_MESSAGES never renames existing knowledge.
+            key = root_key if chunk_index == 0 else f"{root_key}.{chunk_index + 1}"
             content_hash = hashlib.sha256("\x1f".join(str(rows[i][0]) + ":" + (rows[i][6] or "") for i in chunk).encode("utf-8")).hexdigest()[:24]
             discussion_rows.append((
                 next_id, key, rows[root][0], chunk_index, len(chunks), min(stamps) if stamps else None,

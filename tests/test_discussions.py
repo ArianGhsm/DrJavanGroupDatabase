@@ -62,7 +62,7 @@ def test_long_discussions_are_chunked_and_keep_the_opening_question_searchable(t
     full_reindex(archive, db)
     con = sqlite3.connect(db)
     rows = con.execute("SELECT discussion_key, message_count, text_normalized FROM discussions ORDER BY id").fetchall()
-    assert [row[0] for row in rows] == ["1.1", "1.2"]
+    assert [row[0] for row in rows] == ["1", "1.2"]
     assert rows[0][1] == MAX_CHUNK_MESSAGES
     assert "زیرکونیا" in rows[1][2]  # header carried into later chunks
     hits = con.execute("SELECT count(*) FROM discussions_fts WHERE discussions_fts MATCH 'زیرکونیا'").fetchone()[0]
@@ -93,3 +93,19 @@ def test_schema_v2_database_migrates_and_gets_discussions(tmp_path: Path):
     assert ensure_schema(connection) == 3
     connection.close()
     assert _members(db)["1"] == [1, 2]
+
+
+def test_first_chunk_key_is_stable_when_a_discussion_grows(tmp_path: Path):
+    archive = tmp_path / "archive"; archive.mkdir()
+    first = default_message(1, "A", "پرسش", date=DAY1)
+    replies = [default_message(i, f"U{i}", f"پاسخ {i}", reply=1, date=DAY1_LATER) for i in range(2, MAX_CHUNK_MESSAGES + 1)]
+    write_page(archive / "messages.html", first + "".join(replies))
+    db = tmp_path / "a.sqlite3"
+    full_reindex(archive, db)
+    before = _members(db)
+    assert list(before) == ["1"] and len(before["1"]) == MAX_CHUNK_MESSAGES
+    write_page(archive / "messages2.html", default_message(999, "Z", "پاسخ جدید", reply=1, date=DAY1_LATER))
+    incremental_index(archive, db)
+    after = _members(db)
+    assert after["1"] == before["1"]
+    assert after["1.2"] == [999]  # the opening question is carried as header text, not as a member
