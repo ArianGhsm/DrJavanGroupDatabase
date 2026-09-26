@@ -4,7 +4,7 @@ import threading
 import time
 from typing import Any
 
-from drjavanbot.ai.orchestrator import AIConfigurationError
+from drjavanbot.ai.config import AIConfigurationError
 from drjavanbot.ai.provider import AuthenticationError, ProviderResponseError, ProviderTimeoutError, ProviderUnavailableError, RateLimitError
 from .admin_ui import AdminControlCenter
 from .api import TelegramAPI, TelegramAPIError
@@ -92,7 +92,7 @@ class TelegramBotApp:
             if command == "/errors": self.admin.show_errors(chat_id); return
             if command == "/health": self.admin.show_health(chat_id); return
             if command == "/stats": self.admin.show_stats(chat_id); return
-        if command == "/start": self.api.send_message(chat_id, "🦷 <b>DrJavanBot</b>\nسؤال را بفرستید؛ پاسخ اول از آرشیو گروه ساخته می‌شود و اگر آنجا نبود، از منابع علمی یا به‌روز با ذکر منبع."); return
+        if command == "/start": self.api.send_message(chat_id, "🦷 <b>DrJavanBot</b>\nهر سؤالی دارید بفرستید؛ جواب از بحث‌های گروه ساخته می‌شود و به پیام‌های اصلی ارجاع می‌دهد. سؤال‌های بعدی را هم می‌توانید در ادامه همان موضوع بپرسید."); return
         if command == "/help": self.api.send_message(chat_id, self._help_text(user_id)); return
         if command in {"/settings", "/health", "/stats", "/reindex", "/allow", "/deny"}:
             if not self._require_owner_private(chat_id, user_id, is_private): return
@@ -263,7 +263,7 @@ class TelegramBotApp:
         self.api.send_message(chat_id,"⛔️ این دستور فقط برای مالک و در گفت‌وگوی خصوصی مجاز است."); return False
 
     def _help_text(self, user_id: int) -> str:
-        base="سؤال متنی بفرستید. پاسخ اول از آرشیو گروه و در صورت نبودن، از منابع علمی/به‌روز با ذکر منبع ساخته می‌شود.\n/start — شروع\n/help — راهنما"
+        base="سؤال متنی بفرستید. جواب فقط از بحث‌های گروه ساخته می‌شود، با ارجاع به پیام‌ها.\n/start — شروع\n/help — راهنما"
         if user_id==self.owner_id: base += "\n/settings — پنل مالک\n/health — سلامت\n/stats — آمار\n/reindex — بازسازی ایندکس\n/allow ID و /deny ID — allowlist\n/panel — مرکز مدیریت\n/update — به‌روزرسانی نرم‌افزار\n/errors — خطاهای اخیر"
         return base
 

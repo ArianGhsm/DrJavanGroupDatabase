@@ -1,14 +1,10 @@
 # Executable answer policy
 
-The active product contract is Intelligence v2. See:
-
-- [`intelligence-v2/SOURCE_POLICY.md`](intelligence-v2/SOURCE_POLICY.md)
-- [`intelligence-v2/ANSWER_POLICY.md`](intelligence-v2/ANSWER_POLICY.md)
-- [`intelligence-v2/ARCHITECTURE.md`](intelligence-v2/ARCHITECTURE.md)
+The active design is the archive brain: [`ai-pipeline.md`](ai-pipeline.md). The multi-source Intelligence v2 contract below is superseded and kept in [`history/`](history/) for reference.
 
 ## Authority
 
-The Telegram archive is authoritative for **what the group said**. It is no longer the universal factual authority. Scientific dental facts require Scientific/Official evidence; current salary/price/market claims require dated Current/Official evidence; regulation requires Official evidence. Explicit `فقط از گروه` forbids external factual material. Model memory is never factual evidence.
+The Telegram archive is the only source. Answers report what the group said, attributed and dated (old prices, regulations and products are flagged by year). Model memory is never factual evidence; a question the group never discussed gets "not discussed".
 
 ## Grounding
 

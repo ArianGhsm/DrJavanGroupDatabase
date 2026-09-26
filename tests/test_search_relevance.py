@@ -7,10 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from drjavanbot.ai.planner import deterministic_fallback_plan
-from drjavanbot.ai.retrieval import retrieve_with_plan
-from drjavanbot.ai.search_policy import infer_question_facets
-from drjavanbot.intelligence.facets import detect_facets
 from drjavanbot.search import SearchQuery, SQLiteSearchBackend
 from drjavanbot.search.numerals import colloquial_variants, number_variants
 from drjavanbot.search.terms import informative_query
@@ -79,22 +75,3 @@ def test_numeral_and_colloquial_equivalents():
 ])
 def test_natural_questions_rank_the_relevant_message_first(archive_db: Path, query: str, expected: int):
     assert _top(SQLiteSearchBackend(archive_db), query) == expected
-
-
-@pytest.mark.parametrize(("query", "expected"), [
-    ("کامپوزیت خوب برای خلفی چی پیشنهاد میدید", 101),
-    ("کسی میدونه قیمت یونیت چنده", 102),
-    ("نظر دکتر جوان درباره پالپوتومی با MTA چیه", 103),
-    ("باندینگ نسل هفتم", 100),
-])
-def test_planned_retrieval_finds_the_discussion(archive_db: Path, query: str, expected: int):
-    report = retrieve_with_plan(SQLiteSearchBackend(archive_db), deterministic_fallback_plan(query))
-    assert expected in [candidate.message.message_id for candidate in report.candidates[:3]]
-
-
-def test_copular_chiye_is_not_a_definition_request_when_something_else_is_asked():
-    assert "definition" not in infer_question_facets("بهترین برند ایمپلنت چیه")
-    assert "definition" not in infer_question_facets("نظر دکتر جوان درباره پالپوتومی چیه")
-    assert "definition" in infer_question_facets("پالپوتومی چیه")
-    assert "definition" not in detect_facets("نظر گروه درباره پالپوتومی چیه")
-    assert "definition" in detect_facets("پالپوتومی چیه")

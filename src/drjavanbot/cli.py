@@ -11,10 +11,7 @@ from drjavanbot.benchmark import benchmark_archive
 from drjavanbot.config import Settings
 from drjavanbot.health import local_index_health
 from drjavanbot.search import SQLiteSearchBackend, SearchQuery
-from drjavanbot.semantic_benchmark import semantic_benchmark_archive
 from drjavanbot.storage import full_reindex, incremental_index
-from drjavanbot.ai.semantic_eval import run_quality_eval
-from drjavanbot.ai.eval.reporting import human_summary
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,29 +36,21 @@ def build_parser() -> argparse.ArgumentParser:
     bench = sub.add_parser("benchmark", help="Build an isolated temporary index and benchmark retrieval")
     bench.add_argument("queries", nargs="*", default=["RCT", "ایمپلنت", "e max"])
 
-    semantic = sub.add_parser(
-        "semantic-benchmark",
-        help="Run deterministic semantic-retrieval regression metrics against the complete archive",
+    evaluation = sub.add_parser(
+        "archive-eval",
+        help="Measure discussion retrieval on real archive questions (no AI calls)",
     )
-    semantic.add_argument("--top-k", type=int, default=12)
-    semantic.add_argument(
-        "--strict",
-        action="store_true",
-        help="Return non-zero when stable present/absent retrieval gates fail",
-    )
+    evaluation.add_argument("--strict", action="store_true", help="Non-zero exit when recall gates fail")
+    evaluation.add_argument("--json-out", type=Path)
 
-    quality = sub.add_parser(
-        "quality-eval",
-        help="Run the v2 Quality Lab with one full-archive index and PII-safe reports",
-    )
-    quality.add_argument("--top-k", type=int, default=12)
-    quality.add_argument("--base-sha", default="unknown")
-    quality.add_argument("--json-out", type=Path)
-    quality.add_argument(
-        "--strict",
-        action="store_true",
-        help="Return non-zero when frozen quality/safety gates fail",
-    )
+    study = sub.add_parser("study", help="Write LLM study cards for discussions (resumable, incremental)")
+    study.add_argument("--limit", type=int, default=None)
+    study.add_argument("--workers", type=int, default=6)
+    study.add_argument("--secret-dir", type=Path, default=None)
+
+    ask = sub.add_parser("ask", help="Answer one question end-to-end with the configured AvalAI key")
+    ask.add_argument("question")
+    ask.add_argument("--secret-dir", type=Path, default=None)
     return parser
 
 
@@ -98,20 +87,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "benchmark":
         print(json.dumps(benchmark_archive(archive_dir, tuple(args.queries)).as_dict(), ensure_ascii=False, indent=2))
         return 0
-    if args.command == "semantic-benchmark":
-        report = semantic_benchmark_archive(archive_dir, top_k=args.top_k)
-        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
-        return 0 if (not args.strict or report.passed) else 1
-    if args.command == "quality-eval":
-        report = run_quality_eval(archive_dir, top_k=args.top_k, base_sha=args.base_sha)
-        payload = report.as_dict()
+    if args.command == "archive-eval":
+        from drjavanbot.evaluation.runner import run_archive_eval
+        report, passed = run_archive_eval(db_path)
         if args.json_out is not None:
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
-            args.json_out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        else:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-        print(human_summary(report), file=sys.stderr)
-        return 0 if (not args.strict or report.passed) else 1
+            args.json_out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
+        return 0 if (passed or not args.strict) else 1
+    if args.command == "study":
+        from drjavanbot.evaluation.runner import study_once
+        report = study_once(db_path, settings.data_dir / "knowledge.sqlite3", limit=args.limit, workers=args.workers,
+                            secret_dir=args.secret_dir or settings.data_dir.parent / "secrets")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if not report.get("stopped_reason") else 1
+    if args.command == "ask":
+        from drjavanbot.evaluation.runner import ask_once
+        answer = ask_once(db_path, args.question, secret_dir=args.secret_dir or settings.data_dir.parent / "secrets")
+        print(json.dumps(answer.to_dict(), ensure_ascii=False, indent=2))
+        return 0
     return 2
 
 

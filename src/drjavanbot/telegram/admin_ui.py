@@ -142,6 +142,8 @@ class AdminControlCenter:
             "adm:archive": lambda: self.show_archive(chat_id, message_id),
             "adm:archive:reindex": lambda: self._confirm_reindex(chat_id, message_id),
             "adm:archive:reindex:yes": lambda: self.app._start_reindex(chat_id),
+            "adm:archive:study": lambda: self._start_study(chat_id, message_id),
+            "adm:archive:study:stop": lambda: self._stop_study(chat_id, message_id),
             "adm:access": lambda: self.show_access(chat_id, message_id),
             "adm:tools": lambda: self.show_tools(chat_id, message_id),
             "adm:errors": lambda: self.show_errors(chat_id, message_id),
@@ -351,9 +353,35 @@ class AdminControlCenter:
             f"آخرین بازسازی: {html_escape(str(last_reindex))}\n"
             f"وضعیت: {'🟢 آماده' if index_ok else '🟡 نیازمند بررسی'}"
         )
+        study = self._study_status()
+        text += "\n\n" + _study_text(study)
+        study_button = ("⏹ توقف مطالعه", "adm:archive:study:stop") if study.get("running") else ("🧠 مطالعهٔ آرشیو", "adm:archive:study")
         self._send_or_edit(chat_id, message_id, text, inline_keyboard([
-            [("🔄 بازسازی ایندکس", "adm:archive:reindex")], [("⬅️ مرکز مدیریت", "adm:home")],
+            [study_button], [("🔄 بازسازی ایندکس", "adm:archive:reindex")], [("⬅️ مرکز مدیریت", "adm:home")],
         ]))
+
+    def _study_status(self) -> dict:
+        getter = getattr(self.services, "study_status", None)
+        if not callable(getter):
+            return {}
+        try:
+            return dict(getter())
+        except Exception:
+            return {}
+
+    def _start_study(self, chat_id: int, message_id: int | None) -> None:
+        try:
+            started = self.services.start_study()
+            note = "🧠 مطالعهٔ آرشیو شروع شد. هر بحث یک بار خوانده و خلاصه می‌شود؛ پیشرفت را در همین صفحه ببینید." if started else "مطالعه همین حالا در حال اجراست."
+        except Exception as exc:
+            note = "⚙️ کلید AvalAI تنظیم نشده است." if type(exc).__name__ == "AIConfigurationError" else "⚠️ شروع مطالعه ممکن نشد."
+        self.api.send_message(chat_id, note)
+        self.show_archive(chat_id, message_id)
+
+    def _stop_study(self, chat_id: int, message_id: int | None) -> None:
+        self.services.stop_study()
+        self.api.send_message(chat_id, "⏹ مطالعه بعد از پیام‌های در حال پردازش متوقف می‌شود؛ بعداً از همان‌جا ادامه می‌یابد.")
+        self.show_archive(chat_id, message_id)
 
     def show_access(self, chat_id: int, message_id: int | None = None) -> None:
         mode = str(self.state.access_mode())
@@ -889,3 +917,24 @@ def _change_class_label(value: str) -> str:
 
 
 __all__ = ["AdminControlCenter", "V"]
+
+
+def _study_text(study: dict) -> str:
+    if not study:
+        return ""
+    cards = int(study.get("cards") or 0)
+    useful = int(study.get("useful") or 0)
+    remaining = study.get("remaining")
+    lines = [f"🧠 <b>مطالعهٔ آرشیو</b>: {useful} بحث مفید خلاصه شده ({cards} بررسی‌شده)"]
+    if study.get("running"):
+        lines.append(f"در حال اجرا: {int(study.get('progress') or 0)} از {int(study.get('batch') or 0)}")
+    elif remaining:
+        lines.append(f"{int(remaining)} بحث هنوز مطالعه نشده است.")
+    elif remaining == 0:
+        lines.append("همهٔ بحث‌های مهم مطالعه شده‌اند.")
+    last = study.get("last") or {}
+    if last.get("stopped") == "authentication_failed":
+        lines.append("⚠️ مطالعه به‌خاطر خطای کلید AvalAI متوقف شد.")
+    elif last.get("stopped") == "rate_limited":
+        lines.append("⏳ به‌خاطر محدودیت درخواست متوقف شد؛ بعداً ادامه دهید.")
+    return "\n".join(lines)
