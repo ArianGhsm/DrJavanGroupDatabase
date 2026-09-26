@@ -42,10 +42,22 @@ def ensure_schema(connection: sqlite3.Connection) -> int:
         connection.executescript(schema_sql())
         connection.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
         connection.execute(
-            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '2')",
         )
         connection.commit()
+        version = 2
+    if version == 2:
+        # v3 adds reconstructed discussions; tables are populated by the
+        # indexer (rebuild_discussions) in the same run.
+        from .discussions import rebuild_discussions
+
+        connection.executescript(schema_sql())
+        with connection:
+            rebuild_discussions(connection)
+            connection.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
         version = SCHEMA_VERSION
     if version != SCHEMA_VERSION:
         raise SchemaError(f"no migration path from schema {version} to {SCHEMA_VERSION}")

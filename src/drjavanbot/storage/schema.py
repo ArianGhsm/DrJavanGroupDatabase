@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def schema_sql() -> str:
@@ -83,6 +83,39 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_vocab USING fts5vocab(messages_fts, 'row');
+
+-- Discussions (schema v3): reconstructed conversation units, rebuilt after
+-- every index change by storage/discussions.py. discussion_key is stable
+-- across reindexes (derived from Telegram message ids).
+CREATE TABLE IF NOT EXISTS discussions (
+    id INTEGER PRIMARY KEY,
+    discussion_key TEXT NOT NULL UNIQUE,
+    root_row_id INTEGER NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL,
+    start_utc TEXT,
+    end_utc TEXT,
+    message_count INTEGER NOT NULL,
+    author_count INTEGER NOT NULL,
+    text_normalized TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    builder_version TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discussion_messages (
+    discussion_id INTEGER NOT NULL REFERENCES discussions(id) ON DELETE CASCADE,
+    message_row_id INTEGER NOT NULL PRIMARY KEY,
+    position INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_discussion_messages_discussion ON discussion_messages(discussion_id, position);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS discussions_fts USING fts5(
+    text_normalized,
+    content='discussions',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
 
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, text_normalized, author_normalized, forwarded_from)
