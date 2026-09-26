@@ -14,6 +14,7 @@ from drjavanbot.ingest import ArchiveFile, TelegramHTMLParser, discover_archive_
 from drjavanbot.ingest.parser import content_hash_for
 from drjavanbot.normalization import normalize_author
 from .migrations import ensure_schema
+from .discussions import rebuild_discussions
 from .schema import SCHEMA_VERSION
 
 
@@ -74,6 +75,8 @@ def full_reindex(
             records, previous_author = _resolve_joined_authors(records, previous_author)
             with connection:
                 _publish_source(connection, source, records, parser.parser_version)
+        with connection:
+            rebuild_discussions(connection)
         _validate_database(connection, expected_files=len(sources))
         connection.commit()
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -156,6 +159,9 @@ def incremental_index(
                 _publish_source(connection, source, records, parser.parser_version)
             published += 1
 
+        if published or removed:
+            with connection:
+                rebuild_discussions(connection)
         _validate_database(connection, expected_files=len(sources))
         connection.commit()
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")

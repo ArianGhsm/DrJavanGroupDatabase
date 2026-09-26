@@ -118,7 +118,10 @@ class ArchiveAnswerService:
             return _not_searchable_answer(ai_calls=0)
 
         index_version = _index_fingerprint(self.backend)
-        cache_key = _cache_key(normalized, index_version, self.config)
+        # A precomputed plan (a follow-up resolved from conversation context)
+        # changes the topic behind identical text such as "نظرتون درباره‌ش چیه؟",
+        # so its topic must be part of the answer's cache identity.
+        cache_key = _cache_key(normalized + _plan_identity(precomputed_plan), index_version, self.config)
         if self.cache is not None:
             cached = self.cache.get(cache_key)
             if cached is not None:
@@ -726,6 +729,14 @@ def _index_fingerprint(backend: SearchBackend) -> str:
         parts["explicit_index_version"] = explicit
     raw = json.dumps(parts, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _plan_identity(plan: SearchPlan | None) -> str:
+    if plan is None:
+        return ""
+    groups = tuple(tuple(group) for group in (getattr(plan, "topic_anchor_groups", ()) or ()))
+    queries = tuple(query for _family, query in plan.queries)
+    return "\nplan:" + json.dumps([groups, queries], ensure_ascii=False, sort_keys=True)
 
 
 def _cache_key(normalized_question: str, index_version: str, config: AIConfig) -> str:

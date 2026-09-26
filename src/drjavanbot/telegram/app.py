@@ -162,8 +162,13 @@ class TelegramBotApp:
             except TypeError as exc:
                 if "user_id" not in str(exc): raise
                 return progressive(question, progress)
-        # Compatibility with test/custom service implementations.
-        return self.services.answer(question)
+        # Without the progress UI the user's identity must still reach the
+        # service, or follow-ups lose their conversation topic.
+        try:
+            return self.services.answer(question, user_id=user_id)
+        except TypeError as exc:
+            if "user_id" not in str(exc): raise
+            return self.services.answer(question)
 
     def _send_answer_chunk(self, chat_id: int, chunk: str, *, reply_markup: dict | None) -> None:
         try: self.api.send_message(chat_id, chunk, reply_markup=reply_markup)
