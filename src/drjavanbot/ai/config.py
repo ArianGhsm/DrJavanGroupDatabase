@@ -9,7 +9,11 @@ DEFAULT_AVALAI_BASE_URL = "https://api.avalai.ir/v1"
 DEFAULT_AVALAI_MODEL = "deepseek-v4-flash"
 # Bumped whenever retrieval/answering semantics change so cached answers built
 # by an older pipeline (e.g. before the search-ranking fixes) are not reused.
-ANSWER_PIPELINE_VERSION = "unified-1"
+ANSWER_PIPELINE_VERSION = "brain-1"
+
+
+class AIConfigurationError(RuntimeError):
+    """The AvalAI API key has not been configured by the owner."""
 
 
 @dataclass(frozen=True, slots=True)

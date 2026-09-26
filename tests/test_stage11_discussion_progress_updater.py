@@ -9,9 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from drjavanbot.ai.config import AIConfig
-from drjavanbot.ai.evidence import build_evidence_pack
-from drjavanbot.ai.planner import SearchFamily, SearchPlan
-from drjavanbot.ai.retrieval import retrieve_with_plan
 from drjavanbot.domain import MessageRecord
 from drjavanbot.search import EvidenceCandidate
 from drjavanbot.telegram.app import TelegramBotApp
@@ -48,20 +45,6 @@ def _candidate(mid: int, order: int, text: str, author: str = "A", *, score: flo
     )
 
 
-def _plan() -> SearchPlan:
-    return SearchPlan(
-        searchable=True,
-        intent="recommendation",
-        core_concepts=("کامپوزیت",),
-        aliases=(),
-        optional_concepts=(),
-        entity_types=("product",),
-        query_families=(SearchFamily("topic", ("کامپوزیت",)),),
-        phrases=(),
-        exclude_terms=(),
-        low_information_terms=(),
-        reply_context=True,
-    )
 
 
 class DiscussionBackend:
@@ -89,59 +72,10 @@ class DiscussionBackend:
         return None
 
 
-def test_nearby_retrieval_hits_open_bounded_discussion_windows():
-    backend = DiscussionBackend([
-        _candidate(1, 100, "کامپوزیت الف", "A"),
-        _candidate(2, 105, "کامپوزیت ب", "B"),
-        _candidate(3, 108, "کامپوزیت ج", "C"),
-    ])
-    report = retrieve_with_plan(backend, _plan(), evidence_limit=12)
-    assert report.context_hydrated >= 3
-    assert report.discussion_windows >= 3
-    assert all(before >= 4 and after >= 5 for _, before, after, _ in backend.context_calls[:3])
-    assert all("discussion_window" in candidate.match_reasons for candidate in report.candidates[:3])
-    assert all(candidate.context for candidate in report.candidates[:3])
 
 
-def test_isolated_long_hit_gets_small_context_not_unbounded_history():
-    candidate = _candidate(
-        1,
-        100,
-        "این یک پیام طولانی درباره کامپوزیت است که به تنهایی معنی کامل و مشخصی دارد",
-        "A",
-    )
-    backend = DiscussionBackend([candidate])
-    report = retrieve_with_plan(backend, _plan(), evidence_limit=12)
-    assert report.context_hydrated == 1
-    assert report.discussion_windows == 0
-    assert backend.context_calls[0][1:3] == (2, 3)
 
 
-def test_discussion_pack_reserves_context_without_exceeding_token_or_message_caps():
-    contexts = tuple(
-        _record(100 + i, 101 + i, f"پیام مرتبط {i} درباره تجربه استفاده", f"C{i}")
-        for i in range(12)
-    )
-    values = []
-    for i in range(8):
-        base = _candidate(i + 1, 100 + i * 20, f"کامپوزیت تجربه {i}", f"A{i}")
-        values.append(replace(
-            base,
-            match_reasons=(*base.match_reasons, "discussion_window", "context_available"),
-            context=contexts,
-        ))
-    cfg = replace(
-        AIConfig(),
-        medium_evidence_tokens=1800,
-        hard_evidence_tokens=1800,
-        medium_messages=12,
-        hard_messages=12,
-    )
-    pack = build_evidence_pack("کدوم کامپوزیت بهتره؟", values, cfg)
-    assert len(pack.messages) <= 12
-    assert pack.estimated_tokens <= 1800
-    assert any(item.role in {"context", "reply_context"} for item in pack.messages)
-    assert sum(1 for item in pack.messages if item.role == "evidence") >= 2
 
 
 class FakeCache:

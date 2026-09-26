@@ -1,14 +1,11 @@
 from .cache import ResponseCache
-from .config import AIConfig, EvidenceBudget, classify_question
+from .config import AIConfig, AIConfigurationError
 from .key_manager import AvalAIKeyManager
-from .models import AnswerResult, EvidencePack, ProviderResult, UsageMetrics
-from .orchestrator import AIConfigurationError, ArchiveAnswerService
-from .planner import PLANNER_VERSION, SearchFamily, SearchPlan
-from .planner_cache import SearchPlanCache
-from .query_model import QUERY_MODEL_VERSION, RetrievalPolicy
+from .models import AnswerResult, ProviderResult, UsageMetrics
 from .provider import (
     AuthenticationError,
     AvalAIClient,
+    DeepSeekV4AvalAIClient,
     ProviderError,
     ProviderResponseError,
     ProviderTimeoutError,
@@ -18,11 +15,8 @@ from .provider import (
 from .telemetry import TelemetryStore
 
 __all__ = [
-    "AIConfig", "EvidenceBudget", "classify_question", "AnswerResult", "EvidencePack",
-    "ProviderResult", "UsageMetrics", "ArchiveAnswerService", "AIConfigurationError",
-    "SearchPlan", "SearchFamily", "SearchPlanCache", "PLANNER_VERSION",
-    "QUERY_MODEL_VERSION", "RetrievalPolicy",
-    "AvalAIClient", "ProviderError", "AuthenticationError", "RateLimitError",
+    "AIConfig", "AIConfigurationError", "AnswerResult", "ProviderResult", "UsageMetrics",
+    "AvalAIClient", "DeepSeekV4AvalAIClient", "ProviderError", "AuthenticationError", "RateLimitError",
     "ProviderTimeoutError", "ProviderUnavailableError", "ProviderResponseError",
     "ResponseCache", "TelemetryStore", "AvalAIKeyManager",
 ]

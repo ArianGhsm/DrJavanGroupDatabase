@@ -1,8 +1,8 @@
-# DrJavanBot — Dental Intelligence Assistant با دسترسی ویژه به آرشیو گروه دکتر مهدی جوان
+# DrJavanBot — حافظهٔ گروه دکتر مهدی جوان
 
 > این پروژه توسط **آریان قاسم‌پور** ساخته شده است.
 
-این ریپازیتوری هم آرشیو Telegram HTML Export گروه دکتر مهدی جوان را نگه می‌دارد و هم **Dental Intelligence Assistant** چندمنبعی را اجرا می‌کند. آرشیو برای سؤال «گروه چه گفته؟» منبع privileged است؛ facts علمی از Scientific/Official evidence و اطلاعات زمان‌حساس از Current/Official evidence می‌آیند. DeepSeek/AvalAI می‌تواند سؤال، routing و synthesis را انجام دهد، اما **حافظه عمومی مدل factual authority نیست** و هیچ خلأ شواهدی را حق ندارد با حدس پر کند.
+این ریپازیتوری آرشیو Telegram HTML Export گروه دکتر مهدی جوان را نگه می‌دارد و رباتی را اجرا می‌کند که مثل مدلی که همهٔ پیام‌های گروه را خوانده، به هر سؤال از روی بحث‌های گروه جواب می‌دهد و به پیام‌های اصلی ارجاع می‌دهد. DeepSeek/AvalAI سؤال را می‌فهمد، بحث‌های مرتبط را انتخاب می‌کند و جواب را می‌نویسد، اما **دانش عمومی مدل منبع نیست** و هر نکتهٔ جواب باید به پیامی از گروه ارجاع داشته باشد.
 
 > **حفظ سیاست قبلی:** نسخه کامل و بدون تغییر README/راهنمای تحلیل پیش از تبدیل پروژه به ربات، عیناً در [`docs/original-analysis-policy.md`](docs/original-analysis-policy.md) نگه‌داری شده است. نسخه فشرده اجرایی در [`docs/answer-policy.md`](docs/answer-policy.md) قرار دارد. بنابراین هیچ‌یک از قواعد تحلیلی قبلی حذف نشده‌اند.
 
@@ -10,19 +10,18 @@
 
 در ممیزی مرحله ۱، **۲۴۷ فایل `messages*.html`** پیوسته شناسایی شد: `messages.html` و `messages2.html` تا `messages247.html`.
 
-معماری هدف:
+معماری (جزئیات در [`docs/ai-pipeline.md`](docs/ai-pipeline.md)):
 
 ```text
-Question + bounded conversation context
-  → Question Intelligence (intent/domain/entity/facet/freshness)
-  → Source Router (Archive / Scientific / Current / Official)
-  → source-specific Query Generation
-  → parallel required-source Retrieval
-  → Evidence Fusion + RequestedFactCoverage
-  → Compact Grounded Synthesis (support IDs only)
-  → Application-owned verbatim support + Multi-Source Claim Validation
-  → route-aware Telegram Answer + Citations
+پیام‌ها → بازسازی «بحث»ها از روی ریپلای‌ها و پیام‌های پیوسته
+سؤال + سه نوبت قبلی گفت‌وگو
+  → فهم سؤال با LLM (سؤال مستقل + چند جست‌وجو با واژگان خود گروه)
+  → پیدا کردن ۴۰ بحث کاندید در آرشیو
+  → انتخاب بحث‌های واقعاً مرتبط با LLM
+  → پاسخ فقط از همان بحث‌ها، هر نکته با شماره پیام؛ ارجاع ساختگی حذف می‌شود
 ```
+
+پاسخ **فقط** از آرشیو گروه ساخته می‌شود؛ اگر موضوعی در گروه بحث نشده باشد، ربات همین را می‌گوید.
 
 مسیر داده:
 
@@ -35,7 +34,7 @@ Telegram HTML Export
   → Full / Incremental Reindex
 ```
 
-هدف طراحی، **۰ AI call برای فهم سؤال‌های ساده و مسیرهای archive ساده و معمولاً ۱ call برای synthesis علمی/current/hybrid مستند** است. فقط ambiguity/complexity یا حداکثر یک repair محدود می‌تواند call اضافه ایجاد کند. retrievalهای مستقل چندمنبعی parallel می‌شوند و هیچ raw archive کامل یا full copyrighted article برای هر سؤال به مدل ارسال نمی‌شود.
+هر سؤال معمولاً ۳ فراخوانی AI دارد (فهم سؤال و انتخاب بحث با مدل سریع، نوشتن جواب با مدل انتخابی مالک). کل آرشیو برای هر سؤال به مدل فرستاده نمی‌شود؛ فقط خلاصهٔ ۴۰ بحث کاندید و متن حداکثر ۶ بحث منتخب.
 
 جزئیات تصمیم‌های معماری در [`docs/architecture/ADR-001-core-architecture.md`](docs/architecture/ADR-001-core-architecture.md) و ممیزی داده در [`docs/data-audit.md`](docs/data-audit.md) ثبت شده است.
 
@@ -76,7 +75,7 @@ Stage 4 این قابلیت‌ها را پیاده‌سازی کرده است:
 
 # سیاست اجرایی منابع و پاسخ
 
-این بخش قواعد archive را در معماری جدید خلاصه می‌کند. contract نهایی چندمنبعی در [`docs/intelligence-v2/SOURCE_POLICY.md`](docs/intelligence-v2/SOURCE_POLICY.md) و [`docs/intelligence-v2/ANSWER_POLICY.md`](docs/intelligence-v2/ANSWER_POLICY.md) مرجع اجرایی است؛ [`docs/original-analysis-policy.md`](docs/original-analysis-policy.md) فقط سیاست تاریخی تحلیل آرشیو را حفظ می‌کند.
+این بخش قواعد archive را در معماری جدید خلاصه می‌کند. طراحی فعلی در [`docs/ai-pipeline.md`](docs/ai-pipeline.md) است و طراحی‌های قبلی (چندمنبعی) در [`docs/history/`](docs/history/) نگه داشته شده‌اند؛ [`docs/original-analysis-policy.md`](docs/original-analysis-policy.md) فقط سیاست تاریخی تحلیل آرشیو را حفظ می‌کند.
 
 ## 1. اصل بنیادین
 
