@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--strict", action="store_true", help="Non-zero exit when recall gates fail")
     evaluation.add_argument("--json-out", type=Path)
 
+    study = sub.add_parser("study", help="Write LLM study cards for discussions (resumable, incremental)")
+    study.add_argument("--limit", type=int, default=None)
+    study.add_argument("--workers", type=int, default=6)
+    study.add_argument("--secret-dir", type=Path, default=None)
+
     ask = sub.add_parser("ask", help="Answer one question end-to-end with the configured AvalAI key")
     ask.add_argument("question")
     ask.add_argument("--secret-dir", type=Path, default=None)
@@ -90,6 +95,12 @@ def main(argv: list[str] | None = None) -> int:
             args.json_out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
         return 0 if (passed or not args.strict) else 1
+    if args.command == "study":
+        from drjavanbot.evaluation.runner import study_once
+        report = study_once(db_path, settings.data_dir / "knowledge.sqlite3", limit=args.limit, workers=args.workers,
+                            secret_dir=args.secret_dir or settings.data_dir.parent / "secrets")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if not report.get("stopped_reason") else 1
     if args.command == "ask":
         from drjavanbot.evaluation.runner import ask_once
         answer = ask_once(db_path, args.question, secret_dir=args.secret_dir or settings.data_dir.parent / "secrets")

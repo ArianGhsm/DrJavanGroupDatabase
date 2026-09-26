@@ -9,13 +9,14 @@ rank fusion, and an optional dense (embedding) index joins the same fusion.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import math
 from pathlib import Path
 import sqlite3
 from typing import Protocol, Sequence
 
+from drjavanbot.knowledge.store import Card, KnowledgeStore
 from drjavanbot.normalization import normalize_text
 from drjavanbot.search.lexicon import DentalLexicon
 from drjavanbot.search.numerals import colloquial_variants, number_variants
@@ -50,6 +51,7 @@ class Discussion:
     key: str
     messages: tuple[ArchiveMessage, ...]
     header: ArchiveMessage | None  # opening question when this is a later chunk
+    card: "Card | None" = None     # LLM study card, when the archive has been studied
 
     @property
     def start(self) -> datetime | None:
@@ -57,12 +59,20 @@ class Discussion:
 
 
 class DiscussionRetriever:
-    def __init__(self, db_path: Path, *, lexicon: DentalLexicon | None = None, dense: DenseIndex | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        lexicon: DentalLexicon | None = None,
+        dense: DenseIndex | None = None,
+        knowledge: KnowledgeStore | None = None,
+    ) -> None:
         if not db_path.exists():
             raise FileNotFoundError(db_path)
         self.db_path = db_path
         self.lexicon = lexicon or DentalLexicon.load_default()
         self.dense = dense
+        self.knowledge = knowledge
 
     # -- candidates -------------------------------------------------------
     def search(self, queries: Sequence[str], *, limit: int = 40) -> tuple[int, ...]:
@@ -73,6 +83,10 @@ class DiscussionRetriever:
         connection = connect_database(self.db_path, readonly=True)
         try:
             rankings = [self._lexical(connection, query) for query in phrasings]
+            if self.knowledge is not None:
+                # Study cards carry the vocabulary users ask with (synonyms,
+                # English terms, lay words), bridging paraphrase gaps.
+                rankings.extend(self._cards(connection, query) for query in phrasings)
         finally:
             connection.close()
         if self.dense is not None:
@@ -110,6 +124,21 @@ class DiscussionRetriever:
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [discussion_id for _, discussion_id in scored]
 
+    def _cards(self, connection: sqlite3.Connection, query: str) -> list[int]:
+        tokens = informative_tokens(query)
+        if not tokens or self.knowledge is None:
+            return []
+        expression = " OR ".join(
+            "(" + " OR ".join(_quote(value) for value in self._alternates(token)) + ")" for token in tokens
+        )
+        keys = self.knowledge.search(expression, limit=_POOL)
+        if not keys:
+            return []
+        placeholders = ",".join("?" for _ in keys)
+        ids = dict(connection.execute(
+            f"SELECT discussion_key, id FROM discussions WHERE discussion_key IN ({placeholders})", keys).fetchall())
+        return [ids[key] for key in keys if key in ids]
+
     def _alternates(self, token: str) -> tuple[str, ...]:
         values = [token, *number_variants(token), *colloquial_variants(token)]
         values.extend(s for s in self.lexicon.expand(token, limit=8) if " " not in s and len(s) >= 3)
@@ -146,9 +175,12 @@ class DiscussionRetriever:
                     ).fetchone()
                     header = _message(root) if root else None
                 out.append(Discussion(discussion_id, key, tuple(members[discussion_id]), header))
-            return tuple(out)
         finally:
             connection.close()
+        if self.knowledge is not None and out:
+            cards = self.knowledge.get_many([d.key for d in out])
+            out = [replace(d, card=cards.get(d.key)) for d in out]
+        return tuple(out)
 
 
 def _message(row) -> ArchiveMessage:

@@ -19,18 +19,28 @@ question + last 3 turns of this user's conversation
   → UNDERSTAND (fast model): standalone question + 3-5 queries in archive vocabulary
   → RETRIEVE   (local, brain/retriever.py): 40 candidate discussions
   → RERANK     (fast model): which candidates actually answer it (0-3 relevance)
-  → ANSWER     (owner-selected model): JSON answer from ≤6 discussions; every
-               point cites message ids; ids not shown to the model are dropped;
-               no cited support → "not discussed"
+  → ANSWER     (owner-selected model): JSON answer from ≤6 discussions
 ```
 
+Grounding: every statement (headline, points, Dr. Javan's view, disagreements, takeaway) must carry `{"id", "quote"}` supports whose quote is copied verbatim from the cited message and shares content with the statement. Statements failing this are dropped; an unsupported headline is replaced by the strongest verified point; nothing verified → "not discussed". The rendered "supporting phrases" are these verified quotes.
+
+Privacy: phone numbers, e-mails and Telegram invite links are masked (`brain/redaction.py`) before any archive text is sent to the model — in answers, reranking and study.
+
 - Small talk is answered after UNDERSTAND without searching.
-- Answers are cached by the *resolved* standalone question plus index fingerprint, so a follow-up such as «مقصر کیه؟» never reuses another topic's answer.
+- Answers are cached by the *resolved* standalone question plus index fingerprint and model/pipeline signature, so a follow-up such as «مقصر کیه؟» never reuses another topic's answer.
 - 3 AI calls per question (2 when nothing relevant is found). Understand/rerank use `deepseek-v4-flash` with thinking disabled.
 
 ## Retrieval
 
 `DiscussionRetriever` scores discussions by IDF-weighted coverage of the query over the whole discussion and (×0.5) its opening message, with FTS5 BM25 as tie-breaker, fused across all phrasings with reciprocal-rank fusion. Token equivalents: numbers (هفتم/7/۷), colloquial vowels (دندان/دندون) and single-word lexicon synonyms. A `DenseIndex` (embeddings) can join the same fusion; it is not enabled yet.
+
+## Studying the archive (`knowledge/`)
+
+A one-time, resumable pass writes a card for every discussion with ≥3 messages and ≥2 participants (~23k): topic, main question, summary, verified points, Dr. Javan's view and 8-20 search keywords in other vocabularies (English terms, lay/technical words, spellings). Cards are stored in `knowledge.sqlite3`, separate from the rebuildable index, keyed by discussion key + content hash, so only new or changed discussions are studied again.
+
+Cards join retrieval as another ranked list (their keywords bridge paraphrases such as «لق» ↔ «راکینگ») and give the reranker each candidate's topic and summary. Cards are never cited; answers still quote messages.
+
+Start it from the owner panel (📚 آرشیو و ایندکس → 🧠 مطالعهٔ آرشیو) or `drjavanbot study [--limit N] [--workers 6]`.
 
 ## Evaluation
 

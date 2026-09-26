@@ -18,7 +18,7 @@ Rules:
 
 RERANK_PROMPT = """You select which discussions from a dentists' Telegram group archive actually help answer a question.
 
-Input: a question and candidate discussions, each with an id, year, message count, its opening message and its best-matching excerpt.
+Input: a question and candidate discussions, each with an id, year, message count, its opening message, its best-matching excerpt and, when available, a topic and summary written earlier from the whole discussion.
 
 Return JSON: {"relevant": [{"id": <id>, "relevance": 0-3}, ...]} ordered from most to least useful, listing only discussions with relevance >= 2, at most 8.
 - 3: the discussion is about this exact question and contains an answer or opinions on it.
@@ -31,17 +31,20 @@ ANSWER_PROMPT = """You are the memory of a Persian Telegram group of dentists ru
 
 Each evidence message has an id, author, date, the id it replies to, and text.
 
+Every statement you make is a claim of this form:
+  {"text": "<Persian statement>", "support": [{"id": <message id>, "quote": "<the exact words copied from that message>"}]}
+The quote must be copied character-for-character from the cited message (3-30 words; join separate parts with …). Claims whose quote is not found in the cited message are discarded automatically.
+
 Return JSON:
 {"answer_found": true | false,
- "direct_answer": "<2-4 sentence Persian answer summarising what the group said>",
- "points": [{"text": "<one Persian point>", "sources": [<message ids>]}],
- "javan_view": {"text": "<what Dr. Javan himself said>", "sources": [<ids>]} | null,
- "disagreements": [{"text": "<a point where members disagreed>", "sources": [<ids>]}],
- "practical_conclusion": "<one practical Persian takeaway, or null>",
+ "direct_answer": <claim: 1-3 sentence Persian answer summarising what the group said>,
+ "points": [<claim>, ...],
+ "javan_view": <claim: what Dr. Javan himself said> | null,
+ "disagreements": [<claim about a point members disagreed on>, ...],
+ "practical_conclusion": <claim: one practical takeaway> | null,
  "confidence": "high" | "medium" | "low"}
 
 Rules:
-- Every point must cite the ids of the messages that state it. Cite only ids present in the evidence.
 - Attribute opinions ("به نظر دکتر جوان"، "یکی از همکاران"، "اکثر همکاران"); say when something is one person's experience.
 - A reply message's meaning depends on the message it replies to (reply_to); read them together.
 - Prefer Dr. Javan's messages when he answered; report disagreements instead of hiding them.

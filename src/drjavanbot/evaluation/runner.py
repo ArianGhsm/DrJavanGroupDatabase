@@ -43,9 +43,32 @@ def ask_once(db_path: Path, question: str, *, secret_dir: Path):
     api_key = LocalFileSecretStore(secret_dir).get_secret(AVALAI_API_KEY_SECRET)
     if not api_key:
         raise AIConfigurationError(f"no AvalAI key in {secret_dir}")
-    brain = ArchiveBrain(retriever=DiscussionRetriever(db_path),
+    from drjavanbot.knowledge.store import KnowledgeStore
+
+    knowledge_path = db_path.parent / "knowledge.sqlite3"
+    knowledge = KnowledgeStore(knowledge_path) if knowledge_path.exists() else None
+    brain = ArchiveBrain(retriever=DiscussionRetriever(db_path, knowledge=knowledge),
                          model=AvalAIJSONModel(api_key=api_key, config=AIConfig.from_env()))
     return brain.answer(question).answer
 
 
-__all__ = ["GATE_RECALL_AT_10", "GATE_RECALL_AT_40", "ask_once", "run_archive_eval"]
+def study_once(db_path: Path, knowledge_path: Path, *, limit: int | None, workers: int, secret_dir: Path) -> dict[str, Any]:
+    from drjavanbot.ai.config import AIConfig, AIConfigurationError
+    from drjavanbot.brain.model import AvalAIJSONModel
+    from drjavanbot.knowledge.store import KnowledgeStore
+    from drjavanbot.knowledge.study import study_archive
+    from drjavanbot.secrets import AVALAI_API_KEY_SECRET, LocalFileSecretStore
+
+    api_key = LocalFileSecretStore(secret_dir).get_secret(AVALAI_API_KEY_SECRET)
+    if not api_key:
+        raise AIConfigurationError(f"no AvalAI key in {secret_dir}")
+    store = KnowledgeStore(knowledge_path)
+    report = study_archive(db_path, store, AvalAIJSONModel(api_key=api_key, config=AIConfig.from_env()),
+                           limit=limit, workers=workers,
+                           progress=lambda done, total: print(f"\r{done}/{total}", end="", flush=True))
+    print()
+    return {"pending": report.pending, "studied": report.studied, "useful": report.useful,
+            "failed": report.failed, "stopped_reason": report.stopped_reason, **store.stats()}
+
+
+__all__ = ["GATE_RECALL_AT_10", "GATE_RECALL_AT_40", "ask_once", "run_archive_eval", "study_once"]

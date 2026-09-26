@@ -14,6 +14,8 @@ from drjavanbot.ai.telemetry import TelemetryStore
 from drjavanbot.brain.engine import ArchiveBrain, Turn
 from drjavanbot.brain.model import AvalAIJSONModel
 from drjavanbot.brain.retriever import DiscussionRetriever
+from drjavanbot.knowledge.store import KnowledgeStore
+from drjavanbot.knowledge.study import pending_discussions, study_archive
 from drjavanbot.search import SQLiteSearchBackend
 from drjavanbot.secrets import AVALAI_API_KEY_SECRET,LocalFileSecretStore
 from drjavanbot.storage import database_health,full_reindex
@@ -27,7 +29,7 @@ _LOG=logging.getLogger(__name__)
 
 class RuntimeServices:
     def __init__(self,*,archive_dir:Path,data_dir:Path,cache_dir:Path,secret_dir:Path,base_ai_config:AIConfig,state:BotStateStore):
-        self.archive_dir=archive_dir; self.data_dir=data_dir; self.db_path=data_dir/"archive.sqlite3"; self.state=state; self.base_ai_config=base_ai_config; self.secret_store=LocalFileSecretStore(secret_dir); self.cache=ResponseCache(cache_dir/"ai_responses.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.telemetry=TelemetryStore(data_dir/"ai_usage.sqlite3"); self.updates=UpdateControl(data_dir); self._reindex_lock=threading.Lock(); self._reindex_lock_path=data_dir/"reindex.lock"
+        self.archive_dir=archive_dir; self.data_dir=data_dir; self.db_path=data_dir/"archive.sqlite3"; self.state=state; self.base_ai_config=base_ai_config; self.secret_store=LocalFileSecretStore(secret_dir); self.cache=ResponseCache(cache_dir/"ai_responses.sqlite3",ttl_seconds=base_ai_config.cache_ttl_seconds); self.telemetry=TelemetryStore(data_dir/"ai_usage.sqlite3"); self.updates=UpdateControl(data_dir); self.knowledge=KnowledgeStore(data_dir/"knowledge.sqlite3"); self._study_thread=None; self._study_stop=threading.Event(); self._study_progress=(0,0); self._study_last=None; self._reindex_lock=threading.Lock(); self._reindex_lock_path=data_dir/"reindex.lock"
     def model(self):
         m=self.state.selected_model(self.base_ai_config.model); return m if m in ALLOWED_MODELS else self.base_ai_config.model
     def set_model(self,m):
@@ -56,9 +58,9 @@ class RuntimeServices:
         config=self._ai_config()
         history=self.state.recent_turns(int(user_id)) if user_id is not None else ()
         brain=ArchiveBrain(
-            retriever=DiscussionRetriever(self.db_path),
+            retriever=DiscussionRetriever(self.db_path,knowledge=self.knowledge),
             model=AvalAIJSONModel(api_key=api_key,config=config,telemetry=self.telemetry),
-            cache=self.cache,index_fingerprint=_index_fingerprint(self.db_path),
+            cache=self.cache,index_fingerprint=_index_fingerprint(self.db_path),config_signature=config.cache_signature(),
         )
         try: result=brain.answer(question,history=history,progress=progress)
         except AuthenticationError: self.state.set_provider_auth_failed(True); raise
@@ -71,6 +73,31 @@ class RuntimeServices:
             try: self.state.add_turn(int(user_id),Turn(question,result.standalone,result.answer.direct_answer))
             except Exception: _LOG.warning("conversation_turn_not_saved")
         return result.answer
+    # -- one-time study of the archive (LLM cards per discussion) --------------
+    def study_status(self):
+        running=self._study_thread is not None and self._study_thread.is_alive()
+        try: remaining=len(pending_discussions(self.db_path,self.knowledge)) if self.db_path.exists() else None
+        except Exception: remaining=None
+        done,total=self._study_progress
+        return {"running":running,"progress":done,"batch":total,"remaining":remaining,"last":self._study_last,**self.knowledge.stats()}
+    def start_study(self,*,workers=6):
+        if self._study_thread is not None and self._study_thread.is_alive(): return False
+        api_key=self.secret_store.get_secret(AVALAI_API_KEY_SECRET)
+        if not api_key: raise AIConfigurationError("AvalAI API key is not configured")
+        if not self.db_path.exists(): raise IndexNotReadyError("index database does not exist")
+        model=AvalAIJSONModel(api_key=api_key,config=self._ai_config(),telemetry=self.telemetry)
+        self._study_stop=threading.Event(); self._study_progress=(0,0)
+        def progress(done,total): self._study_progress=(done,total)
+        def work():
+            try:
+                report=study_archive(self.db_path,self.knowledge,model,workers=workers,progress=progress,stop=self._study_stop)
+                self._study_last={"studied":report.studied,"useful":report.useful,"failed":report.failed,"stopped":report.stopped_reason}
+                if report.stopped_reason=="authentication_failed": self.state.set_provider_auth_failed(True)
+            except Exception as exc:
+                _LOG.exception("study_failed error_class=%s",type(exc).__name__); self._study_last={"error":type(exc).__name__}
+        self._study_thread=threading.Thread(target=work,name="drjavan-study",daemon=True); self._study_thread.start(); return True
+    def stop_study(self):
+        self._study_stop.set(); return self._study_thread is not None and self._study_thread.is_alive()
     def source_details(self,message_ids,source_refs,external_sources=()):
         if not self.db_path.exists(): return []
         backend=SQLiteSearchBackend(self.db_path); out=[]; seen=set(); external_by_ref={str(item.get("source_ref") or ""):item for item in external_sources if isinstance(item,dict)}

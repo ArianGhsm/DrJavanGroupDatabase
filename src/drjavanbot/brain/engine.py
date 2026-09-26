@@ -14,7 +14,7 @@ Facts come only from the archive; model knowledge is never a source.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import logging
@@ -24,6 +24,7 @@ from typing import Any, Callable, Protocol, Sequence
 from drjavanbot.ai.models import AnswerResult, ClaimSupport, GroundedClaim
 from drjavanbot.normalization import normalize_text
 from drjavanbot.search.terms import informative_tokens
+from .redaction import redact
 from .prompts import ANSWER_PROMPT, RERANK_PROMPT, UNDERSTAND_PROMPT
 from .retriever import ArchiveMessage, Discussion, DiscussionRetriever
 
@@ -81,11 +82,15 @@ class ArchiveBrain:
         model: JSONModel,
         cache: AnswerCache | None = None,
         index_fingerprint: str = "",
+        config_signature: str = "",
     ) -> None:
         self.retriever = retriever
         self.model = model
         self.cache = cache
         self.index_fingerprint = index_fingerprint
+        # Model/pipeline settings are part of an answer's identity: changing
+        # the model in the owner panel must not serve the old model's answers.
+        self.config_signature = config_signature
 
     def answer(self, question: str, *, history: Sequence[Turn] = (), progress: ProgressCallback | None = None) -> BrainResult:
         calls = 0
@@ -154,12 +159,7 @@ class ArchiveBrain:
 
     def _rerank(self, question: str, candidates: Sequence[Discussion], terms: frozenset[str]) -> tuple[Discussion, ...]:
         by_id = {d.discussion_id: d for d in candidates}
-        listing = [
-            {"id": d.discussion_id, "year": d.start.year if d.start else None, "messages": len(d.messages),
-             "opening": _clip((d.header or d.messages[0]).text, _SNIPPET_CHARS),
-             "excerpt": _clip(_best_message(d, terms).text, _SNIPPET_CHARS)}
-            for d in candidates
-        ]
+        listing = [_listing_entry(d, terms) for d in candidates]
         try:
             payload = self.model.complete_json(
                 stage="rerank", system=RERANK_PROMPT,
@@ -182,7 +182,7 @@ class ArchiveBrain:
 
     # -- plumbing ---------------------------------------------------------
     def _cache_key(self, standalone: str) -> str:
-        raw = "\n".join((BRAIN_VERSION, self.index_fingerprint, normalize_text(standalone)))
+        raw = "\n".join((BRAIN_VERSION, self.config_signature, self.index_fingerprint, normalize_text(standalone)))
         return "brain:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _store(self, key: str, result: BrainResult) -> BrainResult:
@@ -192,6 +192,21 @@ class ArchiveBrain:
 
 
 # -- evidence ------------------------------------------------------------------
+def _listing_entry(discussion: Discussion, terms: frozenset[str]) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": discussion.discussion_id,
+        "year": discussion.start.year if discussion.start else None,
+        "messages": len(discussion.messages),
+        "opening": _clip(redact((discussion.header or discussion.messages[0]).text), _SNIPPET_CHARS),
+        "excerpt": _clip(redact(_best_message(discussion, terms).text), _SNIPPET_CHARS),
+    }
+    card = discussion.card
+    if card is not None and card.useful:
+        entry["topic"] = card.topic
+        entry["summary"] = _clip(card.summary, _SNIPPET_CHARS)
+    return entry
+
+
 def _query_terms(phrasings: Sequence[str]) -> frozenset[str]:
     return frozenset(token for phrase in phrasings for token in informative_tokens(phrase) if len(token) >= 2)
 
@@ -229,53 +244,106 @@ def _evidence_block(discussions: Sequence[Discussion], terms: frozenset[str]) ->
         lines = []
         for i in sorted(keep):
             message = messages[i]
-            shown[int(message.message_id)] = message
+            text = _clip(redact(message.text), _MESSAGE_CHARS)
+            # Quotes are verified against exactly the (redacted, clipped) text shown.
+            shown[int(message.message_id)] = replace(message, text=text)
             when = message.datetime.strftime("%Y-%m-%d") if message.datetime else "?"
             lines.append({"id": int(message.message_id), "author": message.author or "?", "date": when,
-                          "reply_to": message.reply_to_message_id, "text": _clip(message.text, _MESSAGE_CHARS)})
+                          "reply_to": message.reply_to_message_id, "text": text})
         blocks.append({"discussion": discussion.discussion_id, "messages": lines})
     return blocks, shown
 
 
-def _grounded_answer(payload: dict[str, Any], shown: dict[int, ArchiveMessage], *, calls: int) -> AnswerResult:
-    def cited(item: Any) -> tuple[str, tuple[int, ...]] | None:
-        if not isinstance(item, dict):
-            return None
-        text = _clean_text(item.get("text"))
-        ids = []
-        for value in item.get("sources") or ():
-            try:
-                message_id = int(value)
-            except (TypeError, ValueError):
-                continue
-            if message_id in shown and message_id not in ids:
-                ids.append(message_id)
-        return (text, tuple(ids)) if text and ids else None
+_ELLIPSIS_RE = re.compile(r"\s*(?:…|\.\.\.)\s*")
+_MIN_QUOTE_TOKENS = 3
 
-    points = [p for p in (cited(v) for v in payload.get("points") or ()) if p]
-    disagreements = [p for p in (cited(v) for v in payload.get("disagreements") or ()) if p]
-    host = cited(payload.get("javan_view"))
-    direct = _clean_text(payload.get("direct_answer"))
-    if not payload.get("answer_found") or not direct or not (points or host):
+
+def _quote_in_message(quote: str, message_text: str) -> bool:
+    """The quote must be the message's own words (fragments joined by … allowed)."""
+    target = normalize_text(message_text)
+    fragments = [normalize_text(part) for part in _ELLIPSIS_RE.split(quote or "") if normalize_text(part)]
+    if not fragments or not target:
+        return False
+    if sum(len(f.split()) for f in fragments) < min(_MIN_QUOTE_TOKENS, len(target.split())):
+        return False
+    position = 0
+    for fragment in fragments:
+        found = target.find(fragment, position)
+        if found < 0:
+            return False
+        position = found + len(fragment)
+    return True
+
+
+def _shares_content(claim: str, quotes: Sequence[str]) -> bool:
+    """A claim must be about what its quotes say, not merely cite something real."""
+    claim_terms = {t for t in informative_tokens(claim) if len(t) >= 3}
+    quote_padded = " " + " ".join(normalize_text(q) for q in quotes)
+    return any(f" {term}" in quote_padded or f" {term[:4]}" in quote_padded for term in claim_terms)
+
+
+def _verified_claim(item: Any, shown: dict[int, ArchiveMessage]) -> tuple[str, tuple[ClaimSupport, ...]] | None:
+    """Keep a claim only with at least one support whose quote is verbatim from
+    a shown message and whose content matches the claim."""
+    if not isinstance(item, dict):
+        return None
+    text = _clean_text(item.get("text"))
+    if not text:
+        return None
+    supports: list[ClaimSupport] = []
+    for support in item.get("support") or ():
+        if not isinstance(support, dict):
+            continue
+        try:
+            message_id = int(support.get("id"))
+        except (TypeError, ValueError):
+            continue
+        quote = _clean_text(support.get("quote"))
+        message = shown.get(message_id)
+        if message is None or not _quote_in_message(quote, message.text):
+            continue
+        if any(existing.message_id == message_id for existing in supports):
+            continue
+        supports.append(ClaimSupport(message_id=message_id, source_ref=str(message_id), quote=_clip(quote, 240)))
+    if not supports or not _shares_content(text, [s.quote for s in supports]):
+        return None
+    return text, tuple(supports)
+
+
+def _grounded_answer(payload: dict[str, Any], shown: dict[int, ArchiveMessage], *, calls: int) -> AnswerResult:
+    if not payload.get("answer_found"):
         return _not_discussed(calls)
+    host = _verified_claim(payload.get("javan_view"), shown)
+    points = [p for p in (_verified_claim(v, shown) for v in payload.get("points") or ()) if p]
+    disagreements = [p for p in (_verified_claim(v, shown) for v in payload.get("disagreements") or ()) if p]
+    if not (points or host):
+        return _not_discussed(calls)
+    # The headline answer and the takeaway obey the same rule; an unsupported
+    # headline is replaced by the strongest verified point, never shown as is.
+    direct = _verified_claim(payload.get("direct_answer"), shown)
+    conclusion = _verified_claim(payload.get("practical_conclusion"), shown)
+    headline = direct[0] if direct else (host or points[0])[0]
 
     claims: list[GroundedClaim] = []
-    for kind, (text, ids) in ([("host", host)] if host else []) + [("finding", p) for p in points] + [("disagreement", p) for p in disagreements]:
-        claims.append(GroundedClaim(kind=kind, text=text, supports=tuple(
-            ClaimSupport(message_id=i, source_ref=str(i), quote=_clip(shown[i].text, 200)) for i in ids)))
-    cited_ids = tuple(dict.fromkeys(i for claim in claims for i in (s.message_id for s in claim.supports)))
+    if direct:
+        claims.append(GroundedClaim(kind="answer", text=direct[0], supports=direct[1]))
+    for kind, (text, supports) in ([("host", host)] if host else []) + [("finding", p) for p in points] + [("disagreement", p) for p in disagreements]:
+        claims.append(GroundedClaim(kind=kind, text=text, supports=supports))
+    cited_ids = tuple(dict.fromkeys(s.message_id for claim in claims for s in claim.supports))
     authors = {shown[i].author for i in cited_ids if shown[i].author}
     findings = ([f"نظر دکتر جوان: {host[0]}"] if host else []) + [text for text, _ in points]
     confidence = str(payload.get("confidence") or "medium")
     if confidence not in {"high", "medium", "low"}:
         confidence = "medium"
+    if len(authors) < 2 and confidence == "high":
+        confidence = "medium"
     years = sorted({shown[i].datetime.year for i in cited_ids if shown[i].datetime})
     span = f"، {years[0]}–{years[-1]}" if len(years) > 1 else (f"، {years[0]}" if years else "")
     return AnswerResult(
-        direct_answer=direct,
+        direct_answer=headline,
         key_findings=tuple(findings),
         disagreements=tuple(text for text, _ in disagreements),
-        practical_conclusion=_clean_text(payload.get("practical_conclusion")) or None,
+        practical_conclusion=conclusion[0] if conclusion else None,
         confidence=confidence,
         confidence_reason=f"{len(cited_ids)} پیام از {len(authors)} نفر{span}",
         cited_message_ids=cited_ids,

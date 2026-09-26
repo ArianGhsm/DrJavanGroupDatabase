@@ -16,7 +16,7 @@ from drjavanbot.ai.telemetry import TelemetryStore
 from drjavanbot.ai.validation import ModelOutputError, parse_json_object
 
 FAST_MODEL = "deepseek-v4-flash"
-_FAST_STAGES = frozenset({"understand", "rerank"})
+_FAST_STAGES = frozenset({"understand", "rerank", "study"})
 
 
 class AvalAIJSONModel:
