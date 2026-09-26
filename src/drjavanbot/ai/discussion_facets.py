@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Sequence
+from drjavanbot.search.numerals import colloquial_variants, number_variants
 from drjavanbot.normalization import normalize_text, tokenize
 from .planner import SearchPlan
 from .discussion_types import _HitState
@@ -196,8 +197,18 @@ def _concept_in_text(concept: str, text: str) -> bool:
         return False
     if concept in text:
         return True
+    if " " not in concept and any(variant in text for variant in _surface_equivalents(concept)):
+        return True
     concept_compact = "".join(tokenize(concept))
     if len(concept_compact) < 3:
         return False
     text_compact = "".join(tokenize(text))
     return concept_compact in text_compact
+
+
+def _surface_equivalents(token: str) -> tuple[str, ...]:
+    """Numeric ("هفتم" ↔ "7") and colloquial ("دندان" ↔ "دندون") equivalents."""
+    return tuple(
+        f" {value}" if value.isdigit() else value
+        for value in (*number_variants(token), *colloquial_variants(token))
+    )

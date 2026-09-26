@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
-from drjavanbot.ai.config import AIConfig
+from drjavanbot.ai.config import ANSWER_PIPELINE_VERSION, AIConfig
 from drjavanbot.ai.models import AnswerResult
 from drjavanbot.ai.telemetry import TelemetryStore
 from drjavanbot.search import SQLiteSearchBackend
@@ -111,7 +111,7 @@ class MultiSourceAnswerService:
 
     def _model_signature(self) -> str:
         policy = self.model_policy
-        return ":".join((policy.fast_model, policy.reasoning_model, str(policy.fast_output_tokens),
+        return ":".join((ANSWER_PIPELINE_VERSION, policy.fast_model, policy.reasoning_model, str(policy.fast_output_tokens),
                          str(policy.reasoning_output_tokens), str(policy.synthesis_output_tokens), policy.strong_reasoning_effort))
 
 

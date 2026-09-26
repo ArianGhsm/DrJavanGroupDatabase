@@ -39,11 +39,13 @@ _FACET_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("prognosis", ("پیش اگهی", "پیش آگهی", "پروگنوز", "prognosis", "outcome")),
 )
 
+_OPINION_MARKERS = ("نظر", "نظرتون", "نظرتان", "نظرات", "تجربه", "تجربتون", "opinion", "experience")
+
 _FACET_QUERY_TERMS: dict[str, tuple[str, ...]] = {
     "prevalence": ("شایع", "رایج", "شایع ترین", "most common", "prevalence"),
     "frequency": ("فراوانی", "frequency", "درصد"),
     "epidemiology": ("شیوع", "اپیدمیولوژی", "epidemiology", "prevalence"),
-    "definition": ("تعریف", "یعنی", "definition"),
+    "definition": ("تعریف", "definition"),
     "classification": ("انواع", "طبقه بندی", "classification"),
     "diagnosis": ("تشخیص", "diagnosis"),
     "differential_diagnosis": ("تشخیص افتراقی", "differential diagnosis", "ddx"),
@@ -92,6 +94,13 @@ def infer_question_facets(question: str) -> tuple[str, ...]:
             out.append(facet)
     if "timing_age" in out and "timing" in out:
         out.remove("timing")
+    if "definition" in out and not any(value in normalized for value in ("تعریف", "define", "definition")):
+        # "X چیه؟" usually closes a more specific request ("بهترین برند ... چیه",
+        # "نظر ... درباره X چیه"). Keep definition only when it is the sole facet
+        # and the user is not asking for an opinion/experience.
+        opinion = any(_marker_matches(padded, marker) for marker in _OPINION_MARKERS)
+        if len(out) > 1 or opinion:
+            out.remove("definition")
     return tuple(out)
 
 

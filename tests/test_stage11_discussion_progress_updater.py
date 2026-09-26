@@ -14,7 +14,7 @@ from drjavanbot.ai.planner import SearchFamily, SearchPlan
 from drjavanbot.ai.retrieval import retrieve_with_plan
 from drjavanbot.domain import MessageRecord
 from drjavanbot.search import EvidenceCandidate
-from drjavanbot.telegram.app_v3 import TelegramBotApp
+from drjavanbot.telegram.app import TelegramBotApp
 from drjavanbot.telegram.config import TelegramConfig
 
 

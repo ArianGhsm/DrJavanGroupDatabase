@@ -11,13 +11,14 @@ def test_model_policy_uses_fast_for_simple_and_reasoning_for_ambiguous_multiface
     assert complex_.reasoning_effort == "high"
 
 
-def test_intelligence_feature_flags_default_off_for_production_compatibility(monkeypatch):
+def test_single_answer_pipeline_has_no_version_flags(monkeypatch):
+    # Legacy rollout flags are ignored: there is exactly one answer pipeline.
     for key in ("DRJAVAN_INTELLIGENCE_V2", "DRJAVAN_SOURCE_ROUTER_V2", "DRJAVAN_HYBRID_RETRIEVAL_V2"):
-        monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv(key, "false")
     config = AIConfig.from_env()
-    assert not config.intelligence_v2
-    assert not config.source_router_v2
-    assert not config.hybrid_retrieval_v2
+    for name in ("intelligence_v2", "source_router_v2", "hybrid_retrieval_v2"):
+        assert not hasattr(config, name)
+    assert "unified" in config.cache_signature()
 
 from drjavanbot.intelligence.planning import QuestionIntelligenceEngine
 

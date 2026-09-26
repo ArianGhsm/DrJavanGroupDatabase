@@ -32,13 +32,23 @@ def _c(
     )
 
 
+# Re-frozen with the search-relevance fixes (unified-1). The previous gold was
+# the old ranker's own top result, not a judged answer: for ortho it was a block
+# about implant overdentures (no orthodontics/children content), and for RCT a
+# one-line side remark inside an unrelated conversation. The new gold was
+# verified by reading the archive: an 11-year-old delayed-eruption/crowding
+# orthodontic case, and a multi-author RCT + restoration treatment discussion.
+_REFROZEN_ORTHO = "gold re-frozen: prior gold was unrelated (implant overdenture block)"
+_REFROZEN_RCT = "gold re-frozen: prior gold was a side remark, not an RCT discussion"
+
+
 def golden_cases() -> tuple[GoldenCase, ...]:
     """PII-safe regression metadata. Queries are evaluator inputs, never archive excerpts."""
     return (
         _c("product_emax_direct", "direct_topic_product", "e.max", (("product", ("e max", "emax", "ایمکس")),), anchors=("e max", "emax", "ایمکس"), expectation="present", answerable=True, gold=("abc7ad326f9f048e",)),
         _c("product_composite_recommend", "recommendation_experience", "کدوم برند کامپوزیت خوبه؟", (("topic", ("کامپوزیت", "composite")), ("experience", ("کامپوزیت تجربه", "کامپوزیت پیشنهاد"))), anchors=("کامپوزیت", "composite"), facets=(("خوب", "پیشنهاد", "تجربه", "recommend"),), expectation="present", answerable=True, gold=("7cde4906f46ce5d1",)),
-        _c("ortho_pediatric_timing", "age_timing_population", "برای بچه‌ها ارتودنسی از چه سنی؟", (("topic", ("ارتودنسی", "orthodontic", "ortho")), ("population", ("کودک", "بچه", "اطفال", "pediatric")), ("timing", ("سن", "سالگی", "age", "year"))), anchors=("ارتودنسی", "orthodont", "ortho"), facets=(("کودک", "بچه", "pediatric"), ("سن", "سالگی", "age", "year")), expectation="present", answerable=True, gold=("b7a669a12360a5f5",)),
-        _c("short_rct", "short_acronym", "RCT؟", (("topic", ("RCT", "درمان ریشه", "root canal")),), anchors=("rct", "درمان ریشه", "root canal"), expectation="present", answerable=True, gold=("cc2354563596749a",)),
+        _c("ortho_pediatric_timing", "age_timing_population", "برای بچه‌ها ارتودنسی از چه سنی؟", (("topic", ("ارتودنسی", "orthodontic", "ortho")), ("population", ("کودک", "بچه", "اطفال", "pediatric")), ("timing", ("سن", "سالگی", "age", "year"))), anchors=("ارتودنسی", "orthodont", "ortho"), facets=(("کودک", "بچه", "pediatric"), ("سن", "سالگی", "age", "year")), expectation="present", answerable=True, gold=("7da92d3eba26bb6e",), notes=_REFROZEN_ORTHO),
+        _c("short_rct", "short_acronym", "RCT؟", (("topic", ("RCT", "درمان ریشه", "root canal")),), anchors=("rct", "درمان ریشه", "root canal"), expectation="present", answerable=True, gold=("0bb2d34ea40e615c",), notes=_REFROZEN_RCT),
         _c("mixed_fa_en_emax", "mixed_persian_english", "برای e.max چه تجربه‌ای هست؟", (("product", ("e max", "emax", "ایمکس")), ("experience", ("e max تجربه", "ایمکس تجربه"))), anchors=("e max", "emax", "ایمکس"), facets=(("تجربه", "خوب", "بد", "experience"),)),
         _c("typo_zirconia", "typo_punctuation", "زیرکونیاا؟؟", (("topic", ("زیرکونیاا", "زیرکونیا", "zirconia")),), anchors=("زیرکونیا", "zirconia")),
         _c("comparison_emax_zirc", "comparison", "e.max یا زیرکونیا؟", (("emax", ("e max", "ایمکس")), ("zirconia", ("زیرکونیا", "zirconia")), ("compare", ("e max زیرکونیا", "ایمکس زیرکونیا"))), anchors=("e max", "ایمکس", "زیرکونیا", "zirconia"), facets=(("بهتر", "مقایسه", "versus", "vs"),)),

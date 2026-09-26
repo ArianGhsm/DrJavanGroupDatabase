@@ -5,6 +5,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import hashlib
+import math
+import re
 from pathlib import Path
 import sqlite3
 from typing import Iterable, Sequence
@@ -14,6 +16,8 @@ from drjavanbot.normalization import normalize_author, normalize_text, tokenize
 from drjavanbot.storage.database import connect_database, ensure_schema_readonly
 from .contracts import EvidenceCandidate, SearchQuery
 from .lexicon import DentalLexicon
+from .numerals import colloquial_variants, number_variants
+from .terms import informative_query
 
 _LOW_INFORMATION = {
     "بله", "نه", "آره", "اره", "خوبه", "خوب بود", "همینه", "همین", "ممنون",
@@ -65,6 +69,11 @@ class SQLiteSearchBackend:
             return ()
         candidate_limit = max(1, min(query.candidate_limit, 500))
         evidence_limit = max(1, min(query.evidence_limit, candidate_limit, 100))
+        # Conversational filler ("کسی میدونه ... چنده") never gates retrieval;
+        # a query made only of filler still searches its raw tokens.
+        topical = informative_query(normalized)
+        if topical:
+            normalized = topical
         explicit_variants = tuple(normalize_text(v) for v in query.variants if normalize_text(v))
         synonyms = self.lexicon.expand(normalized)
         variants = _unique((normalized, *explicit_variants, *synonyms))
@@ -72,42 +81,63 @@ class SQLiteSearchBackend:
         scores: dict[int, float] = defaultdict(float)
         reasons: dict[int, set[str]] = defaultdict(set)
         matched: dict[int, set[str]] = defaultdict(set)
+        texts: dict[int, str] = {}
+        bm25: dict[int, float] = {}
         filters, params = _filters(query)
+
+        def seen(row: sqlite3.Row) -> int:
+            rowid = int(row["id"])
+            texts[rowid] = row["text_normalized"] or ""
+            rank = float(row["rank"] or 0.0)
+            if rowid not in bm25 or rank < bm25[rowid]:
+                bm25[rowid] = rank
+            return rowid
 
         # A. exact normalized phrase via FTS phrase query, then verified by substring.
         for row in _fts(connection, _phrase(normalized), filters, params, candidate_limit):
             if normalized in (row["text_normalized"] or ""):
-                rowid = int(row["id"])
+                rowid = seen(row)
                 scores[rowid] += 6.0
                 reasons[rowid].add("exact_phrase")
                 matched[rowid].add(normalized)
 
-        # B/C. Primary tokens use AND/OR; lexical expansions stay phrase-level
-        # so variants such as "ان پی جی" never leak generic single tokens.
+        # Every primary token may be satisfied by an equivalent surface form:
+        # numerals ("هفتم" ↔ "7") and single-token lexicon synonyms.
         primary_tokens = tokenize(normalized)
+        alternates = {token: self._token_alternates(token) for token in primary_tokens}
+        weights = _token_weights(connection, alternates)
+
+        # B. all tokens (each as an OR group of its equivalents).
         if primary_tokens:
-            and_expr = " AND ".join(_quote_fts(token) for token in primary_tokens)
+            and_expr = " AND ".join(_group_expr(alternates[token]) for token in primary_tokens)
             for row in _fts(connection, and_expr, filters, params, candidate_limit):
-                rowid = int(row["id"])
+                rowid = seen(row)
                 scores[rowid] += 3.0
                 reasons[rowid].add("normalized_tokens")
-                text = row["text_normalized"] or ""
-                matched[rowid].update(token for token in primary_tokens if token in text)
 
-        expressions: list[str] = [_quote_fts(token) for token in primary_tokens]
+        # B2. drop-one conjunctions keep messages that miss a single (often
+        # misspelled or paraphrased) token ahead of messages matching just one.
+        if 3 <= len(primary_tokens) <= 6:
+            for skip in primary_tokens:
+                expr = " AND ".join(_group_expr(alternates[t]) for t in primary_tokens if t != skip)
+                for row in _fts(connection, expr, filters, params, max(20, candidate_limit // 2)):
+                    rowid = seen(row)
+                    reasons[rowid].add("partial_tokens")
+
+        # C. broad recall: any token equivalent or multi-word lexical variant.
+        expressions: list[str] = []
+        for token in primary_tokens:
+            expressions.extend(_quote_fts(value) for value in alternates[token])
         expressions.extend(_quote_fts(variant) for variant in variants[1:] if variant)
+        expressions = list(dict.fromkeys(expressions))
         if expressions:
             or_expr = " OR ".join(expressions[:64])
             for row in _fts(connection, or_expr, filters, params, candidate_limit):
-                rowid = int(row["id"])
-                rank = float(row["rank"] or 0.0)
-                scores[rowid] += 1.5 + min(1.5, abs(rank))
+                rowid = seen(row)
                 reasons[rowid].add("fts_bm25")
-                text = row["text_normalized"] or ""
-                matched[rowid].update(token for token in primary_tokens if token in text)
-                synonym_hits = [term for term in synonyms if term and term in text]
+                synonym_hits = [term for term in synonyms if term and _has_term(texts[rowid], term)]
                 if synonym_hits:
-                    scores[rowid] += 0.8
+                    scores[rowid] += 0.5
                     reasons[rowid].add("synonym")
                     matched[rowid].update(synonym_hits)
 
@@ -117,31 +147,55 @@ class SQLiteSearchBackend:
         # still expanded even when another token in the same query had matches.
         covered_primary = {
             token
-            for terms in matched.values()
+            for text in texts.values()
             for token in primary_tokens
-            if token in terms
+            if any(_has_term(text, value) for value in alternates[token])
         }
         fuzzy_terms: list[tuple[str, float]] = []
         for token in primary_tokens:
             if token not in covered_primary:
                 fuzzy_terms.extend(_fuzzy_expansions(connection, token))
         fuzzy_terms = list(dict.fromkeys(fuzzy_terms))[:16]
+        fuzzy_bonus: dict[int, float] = {}
         if fuzzy_terms:
             fuzzy_expr = " OR ".join(_quote_fts(term) for term, _ in fuzzy_terms)
             similarity_by_term = dict(fuzzy_terms)
             for row in _fts(connection, fuzzy_expr, filters, params, candidate_limit):
-                rowid = int(row["id"])
-                text = row["text_normalized"] or ""
-                hit_terms = [term for term, _ in fuzzy_terms if term in text]
+                rowid = seen(row)
+                hit_terms = [term for term, _ in fuzzy_terms if _has_term(texts[rowid], term)]
                 if hit_terms:
-                    best = max(similarity_by_term[term] for term in hit_terms)
-                    scores[rowid] += 1.6 * best
+                    fuzzy_bonus[rowid] = max(similarity_by_term[term] for term in hit_terms)
                     reasons[rowid].add("fuzzy")
                     matched[rowid].update(hit_terms)
 
+        # Relevance = IDF-weighted share of the query actually present in the
+        # message (dominant), plus a per-query-normalized BM25 tie-breaker.
+        # Previously BM25 saturated to a constant, so ties fell back to row id
+        # and the *oldest* message containing any single word ranked first.
+        best_rank = min(bm25.values(), default=0.0)
+        total_weight = sum(weights.values()) or 1.0
+        for rowid, text in texts.items():
+            covered = 0.0
+            for token in primary_tokens:
+                if _has_term(text, token):
+                    covered += weights[token]
+                    matched[rowid].add(token)
+                else:
+                    hit = next((value for value in alternates[token][1:] if _has_term(text, value)), None)
+                    if hit is not None:
+                        covered += 0.85 * weights[token]
+                        matched[rowid].add(hit)
+            coverage = covered / total_weight
+            if rowid in fuzzy_bonus:
+                coverage = max(coverage, min(1.0, coverage + 0.6 * fuzzy_bonus[rowid] / max(1, len(primary_tokens))))
+            relative_rank = (bm25[rowid] / best_rank) if best_rank < 0 else 0.0
+            scores[rowid] += 6.0 * coverage + 1.0 * max(0.0, min(1.0, relative_rank)) + _substance(text)
+            if coverage >= 0.999 and "normalized_tokens" not in reasons[rowid] and len(primary_tokens) > 1:
+                reasons[rowid].add("normalized_tokens")
+
         ranked_ids = [
             rowid for rowid, _ in
-            sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:candidate_limit]
+            sorted(scores.items(), key=lambda item: (-round(item[1], 6), bm25.get(item[0], 0.0), item[0]))[:candidate_limit]
         ]
         records = _load_records(connection, ranked_ids)
         ordered = [records[rowid] for rowid in ranked_ids if rowid in records]
@@ -188,6 +242,13 @@ class SQLiteSearchBackend:
             if len(output) >= evidence_limit:
                 break
         return tuple(output)
+
+    def _token_alternates(self, token: str) -> tuple[str, ...]:
+        values = [token, *number_variants(token), *colloquial_variants(token)]
+        for synonym in self.lexicon.expand(token, limit=8):
+            if " " not in synonym and len(synonym) >= 3:
+                values.append(synonym)
+        return tuple(dict.fromkeys(values))[:8]
 
     def hydrate_context(
         self,
@@ -403,6 +464,71 @@ def _filters(query: SearchQuery) -> tuple[str, tuple[object, ...]]:
         clauses.append("m.datetime_utc <= ?")
         params.append(_utc_iso(query.date_to))
     return " AND " + " AND ".join(clauses), tuple(params)
+
+
+_URL_RE = re.compile(r"(?:https?|www)\S*|\S+\.(?:com|ir|org|net|io)\S*")
+
+
+def _substance(text: str) -> float:
+    """Prefer messages that say something over one-word echoes and bare links.
+
+    BM25 favours very short documents, so "ارتودنسی" or a lone URL otherwise
+    outranks an actual explanation containing the same word. Bounded to 0..1.2
+    so it only reorders messages of similar relevance.
+    """
+    words = [token for token in _URL_RE.sub(" ", text).split() if len(token) > 1]
+    return 1.2 * min(1.0, len(words) / 18.0)
+
+
+def _group_expr(values: Sequence[str]) -> str:
+    quoted = [_quote_fts(value) for value in values if value]
+    if len(quoted) == 1:
+        return quoted[0]
+    return "(" + " OR ".join(quoted) + ")"
+
+
+def _has_term(text: str, term: str) -> bool:
+    """Word-prefix match: "ایمپلنت" matches "ایمپلنتها" but "کم" not "مکمل"."""
+    if not term or not text:
+        return False
+    padded = f" {text}"
+    return f" {term}" in padded
+
+
+def _token_weights(connection: sqlite3.Connection, alternates: dict[str, tuple[str, ...]]) -> dict[str, float]:
+    """Inverse document frequency per token, using its most common equivalent."""
+    if not alternates:
+        return {}
+    total = _document_count(connection)
+    out: dict[str, float] = {}
+    for token, values in alternates.items():
+        df = 0
+        for value in values:
+            row = connection.execute("SELECT doc FROM messages_fts_vocab WHERE term=?", (value,)).fetchone()
+            if row is not None:
+                df = max(df, int(row["doc"]))
+        out[token] = max(0.3, math.log((total + 1) / (df + 1)))
+    return out
+
+
+_DOC_COUNT_CACHE: dict[tuple[str, int], int] = {}
+
+
+def _document_count(connection: sqlite3.Connection) -> int:
+    try:
+        path = connection.execute("PRAGMA database_list").fetchone()[2] or ""
+        version = int(connection.execute("PRAGMA data_version").fetchone()[0])
+        mtime = Path(path).stat().st_mtime_ns if path else 0
+    except (sqlite3.Error, OSError, TypeError, IndexError):
+        path, version, mtime = "", 0, 0
+    key = (path, mtime + version)
+    cached = _DOC_COUNT_CACHE.get(key)
+    if cached is None:
+        cached = int(connection.execute("SELECT count(*) FROM messages").fetchone()[0])
+        if path:
+            _DOC_COUNT_CACHE.clear()
+            _DOC_COUNT_CACHE[key] = cached
+    return max(1, cached)
 
 
 def _utc_iso(value: datetime) -> str:

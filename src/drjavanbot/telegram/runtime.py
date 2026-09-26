@@ -8,7 +8,7 @@ import time
 from drjavanbot.ai.config import AIConfig
 from drjavanbot.config import Settings
 from .api import TelegramAPI, TelegramAPIError, TelegramNetworkError
-from .app_v3 import TelegramBotApp
+from .app import TelegramBotApp
 from .config import TelegramConfig
 from .services import RuntimeServices
 from .state import BotStateStore

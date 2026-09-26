@@ -2,15 +2,7 @@
 
 ## Runtime flags
 
-Stage 2 is controlled by:
-
-```text
-DRJAVAN_INTELLIGENCE_V2=true
-DRJAVAN_SOURCE_ROUTER_V2=true
-DRJAVAN_HYBRID_RETRIEVAL_V2=true
-```
-
-These flags remain **absent/disabled in production during Prompt 1**. Enabling them is a Prompt 2 deployment action. Setting them to `false` restores the legacy archive-only runtime without rolling back code. The production `.env`/EnvironmentFile remains outside Git; change it atomically and keep a pre-change backup for rollback.
+None. The former `DRJAVAN_INTELLIGENCE_V2`, `DRJAVAN_SOURCE_ROUTER_V2` and `DRJAVAN_HYBRID_RETRIEVAL_V2` flags were removed; the runtime has a single archive-first pipeline (see `docs/ai-pipeline.md`, "Single answer pipeline"). Leftover values in a production `.env` are ignored and can be deleted. Rollback is a code rollback through the self-updater.
 
 ## Model policy
 
