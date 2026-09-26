@@ -3,7 +3,7 @@ import json
 
 from drjavanbot.ai.config import AIConfig
 from drjavanbot.ai.provider import TransportResponse
-from drjavanbot.ai.provider_v4 import DeepSeekV4AvalAIClient
+from drjavanbot.ai.provider import DeepSeekV4AvalAIClient
 
 
 class CaptureTransport:

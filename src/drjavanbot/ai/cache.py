@@ -35,10 +35,19 @@ class ResponseCache:
                 con.execute("DELETE FROM response_cache WHERE cache_key=?", (key,))
                 self._increment_counter(con, "misses")
                 return None
+            try:
+                payload = json.loads(row["payload_json"])
+                if not isinstance(payload, dict):
+                    raise ValueError("cache payload is not an object")
+                answer = AnswerResult.from_dict(payload)
+            except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+                # A corrupt or schema-incompatible entry is a miss, never a crash.
+                con.execute("DELETE FROM response_cache WHERE cache_key=?", (key,))
+                self._increment_counter(con, "misses")
+                return None
             con.execute("UPDATE response_cache SET hits=hits+1 WHERE cache_key=?", (key,))
             self._increment_counter(con, "hits")
-            payload = json.loads(row["payload_json"])
-            return AnswerResult.from_dict(payload).with_runtime(cache_hit=True, ai_calls=0)
+            return answer.with_runtime(cache_hit=True, ai_calls=0)
 
     def set(self, key: str, answer: AnswerResult) -> None:
         now = time.time()
@@ -88,7 +97,9 @@ class ResponseCache:
         con.execute("UPDATE cache_meta SET value=value+1 WHERE key=?", (key,))
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.path)
+        con = sqlite3.connect(self.path, timeout=5)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA busy_timeout=5000")
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
         return con

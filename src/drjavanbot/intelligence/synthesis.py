@@ -8,7 +8,7 @@ import time
 from drjavanbot.ai.config import AIConfig
 from drjavanbot.ai.models import AnswerResult, ClaimSupport, GroundedClaim, GroundedSourceClaim, SourceSupport
 from drjavanbot.ai.provider import AvalAIClient, ProviderError
-from drjavanbot.ai.provider_v4 import DeepSeekV4AvalAIClient
+from drjavanbot.ai.provider import DeepSeekV4AvalAIClient
 from drjavanbot.ai.telemetry import TelemetryStore
 from drjavanbot.normalization import normalize_text
 from .fusion import RankedEvidence

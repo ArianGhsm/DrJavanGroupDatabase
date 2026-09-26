@@ -6,10 +6,12 @@ from typing import Any
 
 from drjavanbot.ai.orchestrator import AIConfigurationError
 from drjavanbot.ai.provider import AuthenticationError, ProviderResponseError, ProviderTimeoutError, ProviderUnavailableError, RateLimitError
+from .admin_ui import AdminControlCenter
 from .api import TelegramAPI, TelegramAPIError
 from .config import ALLOWED_MODELS, TelegramConfig
 from .rendering import answer_chunks, html_escape, inline_keyboard, sources_page
 from .contracts import BotServices, IndexNotReadyError
+from .progress import QuestionProgressReporter
 from .state import BotStateStore
 
 _LOG = logging.getLogger(__name__)
@@ -21,6 +23,9 @@ class TelegramBotApp:
         self.services = services
         self.state = state
         self.config = config
+        if hasattr(self.api, "rich_ui_enabled"):
+            self.api.rich_ui_enabled = bool(getattr(config, "rich_ui_enabled", True))
+        self.admin = AdminControlCenter(self)
 
     def handle_update(self, update: dict[str, Any]) -> None:
         try:
@@ -79,7 +84,15 @@ class TelegramBotApp:
 
     def _handle_command(self, chat_id: int, user_id: int, is_private: bool, text: str) -> None:
         command, *rest = text.split(maxsplit=1); command = command.split("@", 1)[0].casefold()
-        if command == "/start": self.api.send_message(chat_id, "🦷 <b>DrJavanBot</b>\nسؤال را بفرستید؛ پاسخ فقط بر پایه آرشیو گروه تولید می‌شود."); return
+        if user_id == self.owner_id and is_private:
+            if command == "/start":
+                self.admin.show_home(chat_id); self.admin.check_for_updates(force=True); return
+            if command in {"/panel", "/settings"}: self.admin.show_home(chat_id); return
+            if command == "/update": self.admin.show_update(chat_id, refresh=True); return
+            if command == "/errors": self.admin.show_errors(chat_id); return
+            if command == "/health": self.admin.show_health(chat_id); return
+            if command == "/stats": self.admin.show_stats(chat_id); return
+        if command == "/start": self.api.send_message(chat_id, "🦷 <b>DrJavanBot</b>\nسؤال را بفرستید؛ پاسخ اول از آرشیو گروه ساخته می‌شود و اگر آنجا نبود، از منابع علمی یا به‌روز با ذکر منبع."); return
         if command == "/help": self.api.send_message(chat_id, self._help_text(user_id)); return
         if command in {"/settings", "/health", "/stats", "/reindex", "/allow", "/deny"}:
             if not self._require_owner_private(chat_id, user_id, is_private): return
@@ -104,18 +117,25 @@ class TelegramBotApp:
         if len(question) > self.config.max_question_chars: self.api.send_message(chat_id, f"سؤال بیش از حد طولانی است. حداکثر {self.config.max_question_chars} نویسه."); return
         if not self.state.consume_rate_slot(user_id, owner_id=self.owner_id): self.api.send_message(chat_id, "⏳ تعداد درخواست‌های شما در یک دقیقه بیش از حد مجاز است."); return
         if not self.services.ai_configured(): self.api.send_message(chat_id, "⚙️ سرویس AI هنوز توسط مدیر تنظیم نشده است."); return
-        try: self.api.send_chat_action(chat_id, "typing")
-        except TelegramAPIError: pass
+        # Live, non-CoT progress is the default; the plain typing indicator is
+        # kept for deployments that disable the progress UI.
+        reporter = QuestionProgressReporter(self.api, chat_id) if getattr(self.config, "progress_ui_enabled", True) else None
+        if reporter is not None:
+            reporter.start()
+        else:
+            try: self.api.send_chat_action(chat_id, "typing")
+            except TelegramAPIError: pass
         started = time.perf_counter()
         try:
-            answer = self.services.answer(question)
+            answer = self._answer(question, user_id=user_id, progress=reporter.on_event if reporter is not None else None)
             latency = (time.perf_counter() - started) * 1000
             self.state.record_question(user_id, success=True, latency_ms=latency, cache_hit=bool(answer.cache_hit), ai_calls=int(answer.ai_calls))
             chunks = answer_chunks(answer)
             for idx, chunk in enumerate(chunks):
                 markup = None
                 if idx == len(chunks)-1 and (answer.cited_message_ids or answer.source_refs):
-                    items = self.services.source_details(answer.cited_message_ids, answer.source_refs)
+                    try: items = self.services.source_details(answer.cited_message_ids, answer.source_refs, getattr(answer, "external_sources", ()))
+                    except TypeError: items = self.services.source_details(answer.cited_message_ids, answer.source_refs)
                     if items:
                         sid = self.state.create_source_session(user_id, items, self.config.source_session_ttl_seconds)
                         markup = inline_keyboard([[("🔎 منابع", f"src:{sid}:0")]])
@@ -128,6 +148,22 @@ class TelegramBotApp:
         except IndexNotReadyError: self._record_failure(user_id, started, "IndexNotReadyError"); self.api.send_message(chat_id, "🗂 ایندکس آرشیو هنوز آماده نیست.")
         except Exception as exc:
             self._record_failure(user_id, started, type(exc).__name__); _LOG.exception("question_failed error_class=%s", type(exc).__name__); self.api.send_message(chat_id, "⚠️ خطای داخلی رخ داد. جزئیات حساس نمایش داده نمی‌شود.")
+        finally:
+            # The status message is transient: it disappears once the answer or
+            # error is already visible so the chat does not accumulate clutter.
+            if reporter is not None:
+                reporter.close()
+
+    def _answer(self, question: str, *, user_id: int, progress):
+        progressive = getattr(self.services, "answer_with_progress", None)
+        if progress is not None and callable(progressive):
+            try:
+                return progressive(question, progress, user_id=user_id)
+            except TypeError as exc:
+                if "user_id" not in str(exc): raise
+                return progressive(question, progress)
+        # Compatibility with test/custom service implementations.
+        return self.services.answer(question)
 
     def _send_answer_chunk(self, chat_id: int, chunk: str, *, reply_markup: dict | None) -> None:
         try: self.api.send_message(chat_id, chunk, reply_markup=reply_markup)
@@ -140,6 +176,8 @@ class TelegramBotApp:
         self.state.record_question(user_id, success=False, latency_ms=(time.perf_counter()-started)*1000, cache_hit=False, ai_calls=0, error_class=error_class)
 
     def _handle_callback(self, cb: dict) -> None:
+        if self.admin.handles_callback(str(cb.get("data") or "")):
+            self.admin.handle_callback(cb); return
         cqid = str(cb.get("id") or ""); user = cb.get("from") or {}; msg = cb.get("message") or {}; chat = msg.get("chat") or {}
         try: user_id = int(user.get("id")); chat_id = int(chat.get("id")); message_id = int(msg.get("message_id"))
         except (TypeError, ValueError): _LOG.warning("telegram_callback_missing_identity"); return
@@ -181,10 +219,26 @@ class TelegramBotApp:
         if data == "reindex": self._start_reindex(chat_id); return
 
     def _show_settings(self, chat_id: int, message_id: int | None = None) -> None:
-        status = "✅ تنظیم شده" if self.services.ai_configured() else "❌ تنظیم نشده"; text = f"<b>تنظیمات مالک</b>\nAvalAI: {status}\nModel: <code>{html_escape(self.services.model())}</code>\nAccess: <code>{self.state.access_mode()}</code>"
-        kb = inline_keyboard([[('🔑 تنظیم/تعویض API Key','setkey'),('🧪 تست AvalAI','testai')],[('🗑 حذف API Key','remove_key'),('🤖 مدل','models')],[('📊 آمار','stats'),('❤️ Health','health')],[('🗂 Reindex','reindex'),('📚 Index','indexstats')],[('🧹 Cache','cache')],[('👥 دسترسی/Rate','access')]])
-        if message_id is None: self.api.send_message(chat_id,text,reply_markup=kb)
-        else: self.api.edit_message_text(chat_id,message_id,text,reply_markup=kb)
+        self.admin.show_home(chat_id, message_id)
+
+    def _show_update(self, chat_id: int, message_id: int | None = None) -> None:
+        self.admin.show_update(chat_id, message_id, refresh=True)
+
+    def _show_recent_errors(self, chat_id: int, message_id: int | None = None) -> None:
+        self.admin.show_errors(chat_id, message_id)
+
+    def notify_update_if_available(self, *, force: bool = False) -> bool:
+        return self.admin.check_for_updates(force=force)
+
+    def sync_update_progress(self) -> bool:
+        return self.admin.sync_update_progress()
+
+    def _owner_home_keyboard(self) -> dict:
+        return inline_keyboard([
+            [("🔄 به‌روزرسانی", "adm:update"), ("❤️ سلامت سیستم", "adm:health")],
+            [("🤖 هوش مصنوعی", "adm:ai"), ("📚 آرشیو و ایندکس", "adm:archive")],
+            [("👥 دسترسی کاربران", "adm:access"), ("🧰 ابزارها", "adm:tools")],
+        ])
 
     def _show_access(self, chat_id: int, message_id: int) -> None:
         mode=self.state.access_mode(); rate=self.state.rate_limit_per_minute(); allowed=self.state.allowed_users(); txt=f"<b>دسترسی</b>\nMode: <code>{mode}</code>\nRate: {rate}/min\nAllowlist: {len(allowed)} کاربر"; rows=[[('Owner only','access:owner_only'),('Allowlist','access:allowlist'),('Public','access:public')],[('3/min','rate:3'),('6/min','rate:6'),('12/min','rate:12')],[('بازگشت','settings')]]; self.api.edit_message_text(chat_id,message_id,txt,reply_markup=inline_keyboard(rows))
@@ -204,8 +258,8 @@ class TelegramBotApp:
         self.api.send_message(chat_id,"⛔️ این دستور فقط برای مالک و در گفت‌وگوی خصوصی مجاز است."); return False
 
     def _help_text(self, user_id: int) -> str:
-        base="سؤال متنی بفرستید. پاسخ فقط از آرشیو گروه استخراج می‌شود.\n/start — شروع\n/help — راهنما"
-        if user_id==self.owner_id: base += "\n/settings — پنل مالک\n/health — سلامت\n/stats — آمار\n/reindex — بازسازی ایندکس\n/allow ID و /deny ID — allowlist"
+        base="سؤال متنی بفرستید. پاسخ اول از آرشیو گروه و در صورت نبودن، از منابع علمی/به‌روز با ذکر منبع ساخته می‌شود.\n/start — شروع\n/help — راهنما"
+        if user_id==self.owner_id: base += "\n/settings — پنل مالک\n/health — سلامت\n/stats — آمار\n/reindex — بازسازی ایندکس\n/allow ID و /deny ID — allowlist\n/panel — مرکز مدیریت\n/update — به‌روزرسانی نرم‌افزار\n/errors — خطاهای اخیر"
         return base
 
     def _health_text(self) -> str:

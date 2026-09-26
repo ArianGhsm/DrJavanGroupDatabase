@@ -18,6 +18,51 @@ _LOW_INFORMATION_TOKENS = frozenset(
         "the", "a", "an", "good", "best", "please", "tell", "me",
     )
 )
+# Conversational Persian that users naturally type around the real topic
+# ("کسی میدونه ... چنده؟", "نظر دکتر درباره ... چیه؟"). These words are common
+# in the archive but never identify a dental topic, so they must not become
+# mandatory retrieval anchors. Dental vocabulary is deliberately absent.
+_CONVERSATIONAL_TOKENS = frozenset(
+    normalize_text(value)
+    for value in (
+        # greetings / addressing
+        "سلام", "درود", "وقت", "بخیر", "ممنون", "مرسی", "سپاس", "تشکر", "متشکرم", "دکتر", "دکترجان",
+        "استاد", "اساتید", "همکار", "همکاران", "همکارای", "دوستان", "دوست", "عزیز", "عزیزان", "گرامی",
+        "بزرگوار", "جناب", "آقای", "اقای", "خانم", "لطفا", "لطفاً", "ببخشید", "خسته", "نباشید",
+        # question framing
+        "نظر", "نظرتون", "نظرتان", "نظرت", "نظرات", "نظری", "درباره", "دربارهٔ", "راجع", "راجب", "راجبه",
+        "مورد", "بابت", "خصوص", "سوال", "سؤال", "سوالی", "سوالم", "یه", "چیزی",
+        "کسی", "کسایی", "کسانی", "کدومش", "کدوماش", "چطوره", "چطور", "چجوری", "چگونه", "چقدره", "چنده",
+        "چند", "چندتا", "کجا", "کجاست", "کی", "آیا", "مگه", "اصلا", "واقعا", "حتما", "دقیقا", "معمولا",
+        "الان", "اخیرا", "تا", "حالا", "هم", "همه", "همین", "بعضی", "خیلی",
+        "چیا", "چیاست", "چه", "چی", "چیه", "چیست", "کدوم", "کدام", "کدومه", "کدامه", "بهتره", "بهترین",
+        "خوبه", "خوبی", "خوب", "بد", "بده", "اینکه", "اون", "اونها", "اونا", "این", "اینا", "اینها",
+        "شون", "تون", "ام", "ات", "اش", "مون", "ی", "ای", "اگه", "اگر", "ولی", "اما", "چون", "پس", "بعد",
+        "قبل", "توی", "تو", "مثل", "مانند", "طور",
+        # colloquial / formal verb forms
+        "میدونه", "میدونید", "میدونین", "میدونی", "میدونم", "بدونم", "بدونید", "میدانید", "میدانم",
+        "میدید", "میدین", "میدی", "میده", "میدن", "بدید", "بدین", "بده", "بدم", "بدن",
+        "میکنید", "میکنین", "میکنی", "میکنه", "میکنم", "میکنن", "کنید", "کنین", "کنم", "کنه", "کنن",
+        "کردید", "کردین", "کردی", "کرده", "کردم", "کردن", "کردند", "کنیم", "کردیم", "بکنم", "بکنید",
+        "میشه", "میشن", "میشد", "بشه", "شده", "شد", "شدن", "شدند", "میشود", "میشوند", "می شود",
+        "میزنید", "میزنین", "میزنی", "میزنه", "بزنم", "بزنید", "بزنین",
+        "میگید", "میگین", "میگی", "میگه", "میگن", "گفتن", "گفته", "گفتید", "بگید", "بگین", "بگو", "بگی",
+        "میخوام", "میخواهم", "میخواستم", "خواستم", "میخواید", "میخواین", "بخوام", "بخواهم",
+        "دارید", "دارین", "داری", "داره", "دارم", "دارن", "دارند", "داریم", "داشتم", "داشتید", "داشتین",
+        "داشته", "هستید", "هستین", "هستی", "هستم", "هست", "هستش", "هستن", "هستند", "نیست", "نیستن",
+        "بودید", "بودین", "بودم", "بودن", "بودند", "باشه", "باشن", "باشید", "باشین", "باشم",
+        "پیشنهادی", "میپرسم", "بپرسم", "پرسیدم", "میخواستم", "بفرمایید", "بفرمایین", "فرمودید", "فرمودین",
+        "استفاده", "تجربه", "تجربش", "تجربشو", "رو", "را", "بهم", "بهش", "براش",
+        "برام", "براتون", "باهاش", "ازش", "توش", "روش",
+        "please", "anyone", "does", "do", "you", "know", "your", "opinion", "about", "any", "how", "much",
+        "what's", "whats", "think", "use", "using", "experience", "someone", "recommend", "for", "of", "in",
+        "on", "to", "with", "and", "or", "it", "this", "that",
+    )
+)
+# "دکتر جوان" / "استاد جوان" / "مهدی جوان" address the group's host; the bare
+# word "جوان" (young) remains informative elsewhere ("بیمار جوان").
+_HOST_PREFIXES = frozenset(normalize_text(v) for v in ("دکتر", "استاد", "مهدی", "اقای", "آقای", "dr"))
+_HOST_NAME = normalize_text("جوان")
 _LATIN_RE = re.compile(r"[a-z]", re.IGNORECASE)
 _SINGLE_LATIN_RE = re.compile(r"^[a-z]$", re.IGNORECASE)
 _LATIN_ALNUM_RE = re.compile(r"[a-z0-9]", re.IGNORECASE)
@@ -36,7 +81,9 @@ def informative_tokens(value: str | None) -> tuple[str, ...]:
     out: list[str] = []
     seen: set[str] = set()
     for index, token in enumerate(tokens):
-        if token in _LOW_INFORMATION_TOKENS or token in seen:
+        if token in _LOW_INFORMATION_TOKENS or token in _CONVERSATIONAL_TOKENS or token in seen:
+            continue
+        if token == _HOST_NAME and index > 0 and tokens[index - 1] in _HOST_PREFIXES:
             continue
         if len(token) <= 1 and not _meaningful_single_latin(tokens, index):
             continue
@@ -51,7 +98,7 @@ def informative_query(value: str | None) -> str:
 
 def is_low_information_token(value: str) -> bool:
     token = normalize_text(value)
-    return not token or token in _LOW_INFORMATION_TOKENS
+    return not token or token in _LOW_INFORMATION_TOKENS or token in _CONVERSATIONAL_TOKENS
 
 
 def distinctive_terms(values: Iterable[str | None], *, exclude: Iterable[str] = (), limit: int = 32) -> tuple[str, ...]:

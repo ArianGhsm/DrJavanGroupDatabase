@@ -71,7 +71,7 @@ def make():
     td=tempfile.TemporaryDirectory(); state=BotStateStore(Path(td.name)/"state.db",default_rate_limit=2); api=FakeAPI();svc=FakeServices(); app=TelegramBotApp(api=api,owner_id=42,services=svc,state=state,config=TelegramConfig(default_rate_limit_per_minute=2,max_question_chars=2000,key_entry_timeout_seconds=300,source_session_ttl_seconds=3600)); return td,state,api,svc,app
 
 def test_owner_auth_private_and_non_owner_denial():
-    td,s,a,v,app=make(); app.handle_update(msg(1,7,"private","/settings")); assert "فقط برای مالک" in a.sent[-1][1]; app.handle_update(msg(2,42,"group","/settings")); assert "گفت‌وگوی خصوصی" in a.sent[-1][1]; app.handle_update(msg(3,42,"private","/settings")); assert "تنظیمات مالک" in a.sent[-1][1]; td.cleanup()
+    td,s,a,v,app=make(); app.handle_update(msg(1,7,"private","/settings")); assert "فقط برای مالک" in a.sent[-1][1]; app.handle_update(msg(2,42,"group","/settings")); assert "گفت‌وگوی خصوصی" in a.sent[-1][1]; app.handle_update(msg(3,42,"private","/settings")); assert "مرکز مدیریت" in a.sent[-1][1]; td.cleanup()
 
 def test_key_flow_deletes_message_and_does_not_echo_key(caplog):
     td,s,a,v,app=make(); app.handle_update(cb(1,42,"setkey")); caplog.set_level(logging.DEBUG); app.handle_update(msg(2,42,"private","valid-key-123",mid=55)); assert (42,55) in a.deleted; assert v.key=="valid-key-123"; rendered=" ".join(x[1] for x in a.sent); assert "valid-key-123" not in rendered; assert "valid-key-123" not in caplog.text; td.cleanup()

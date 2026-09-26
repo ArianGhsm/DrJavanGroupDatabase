@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from drjavanbot.telegram.app_v2 import TelegramBotApp
+from drjavanbot.telegram.app import TelegramBotApp
 from drjavanbot.telegram.config import TelegramConfig
 from drjavanbot.telegram.update_control import RemoteUpdateInfo, UpdateStatus
 

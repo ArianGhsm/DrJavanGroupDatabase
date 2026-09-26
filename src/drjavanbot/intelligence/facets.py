@@ -49,7 +49,7 @@ def _s(
 
 
 FACET_SPECS: tuple[FacetSpec, ...] = (
-    _s("definition", ("تعریف", "چیست", "چیه", "what is", "define"), ("تعریف", "یعنی", "عبارت است", "refers to", "defined as")),
+    _s("definition", ("تعریف", "چیست", "چیه", "what is", "define"), ("تعریف", "عبارت است", "refers to", "defined as")),
     _s("classification", ("طبقه بندی", "دسته بندی", "انواع", "classification", "types of"), ("طبقه بندی", "دسته", "نوع", "classification", "type")),
     _s("prevalence", ("شایع", "شایع تر", "شایع ترین", "رایج", "رایج تر", "رایج ترین", "بیشتر دیده", "بیشتر مشاهده", "most common", "more common", "seen more often", "commonest", "prevalent", "prevalence"), ("شایع", "رایج", "فراوان", "most common", "commonest", "prevalent", "prevalence", "frequency"), shape="frequency_comparison"),
     _s("frequency", ("فراوانی", "frequency", "چند درصد", "چقدر دیده", "چقدر رخ"), ("فراوانی", "frequency", "درصد", "percent", "%", "نرخ"), shape="frequency", numeric=False),
@@ -130,6 +130,10 @@ def detect_facets(question: str) -> tuple[str, ...]:
             found.remove("treatment")
     if "technique" in found and "method" in found and not any(value in normalized for value in ("تکنیک", "technique")):
         found.remove("technique")
+    if "definition" in found and len(found) == 1 and any(
+        _marker_match(padded, value) for value in ("نظر", "نظرتون", "نظرات", "تجربه", "opinion", "experience")
+    ) and not any(value in normalized for value in ("تعریف", "define", "definition")):
+        found.remove("definition")
     if "definition" in found and len(found) > 1:
         # Persian copular frames such as "X چیه؟" often terminate a more
         # specific request (diagnosis, prevalence, guideline, etc.). Keep
