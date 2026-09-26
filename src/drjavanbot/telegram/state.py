@@ -10,6 +10,8 @@ VALID_ACCESS_MODES = {"owner_only", "allowlist", "public"}
 VALID_UPDATE_MODES = {"notify", "auto", "off"}
 _UPDATE_LEASE_SECONDS = 180.0
 _STATE_RETENTION_SECONDS = 7 * 24 * 3600
+_FEEDBACK_RETENTION_SECONDS = 90 * 24 * 3600
+FEEDBACK_REASONS = {"wrong": "جواب اشتباه بود", "missed": "موضوع در گروه بود ولی پیدا نشد", "incomplete": "ناقص بود", "offtopic": "به سؤالم ربطی نداشت"}
 
 @dataclass(frozen=True, slots=True)
 class BotUsageSummary:
@@ -165,6 +167,34 @@ class BotStateStore:
         with self._connect() as con:
             con.execute("INSERT INTO conversation_turns(user_id,payload_json,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at", (int(user_id), payload, time.time()))
 
+    # -- answer feedback (👍/👎) ------------------------------------------------
+    def log_answer(self, user_id: int, question: str, answer: str, cited_message_ids, *, insufficient: bool) -> str:
+        answer_id = secrets.token_urlsafe(9)[:12]
+        with self._connect() as con:
+            con.execute("INSERT INTO answer_feedback(answer_id,user_id,created_at,question,answer,cited_json,insufficient) VALUES(?,?,?,?,?,?,?)",
+                        (answer_id, int(user_id), time.time(), question[:2000], answer[:2000], json.dumps([int(x) for x in cited_message_ids][:40]), int(bool(insufficient))))
+        return answer_id
+
+    def rate_answer(self, answer_id: str, user_id: int, rating: str, reason: str | None = None) -> bool:
+        """Only the person who asked can rate; returns False otherwise."""
+        if rating not in {"up", "down"} or (reason is not None and reason not in FEEDBACK_REASONS):
+            return False
+        with self._connect() as con:
+            cur = con.execute("UPDATE answer_feedback SET rating=?,reason=coalesce(?,CASE WHEN rating=? THEN reason END),rated_at=? WHERE answer_id=? AND user_id=?",
+                              (rating, reason, rating, time.time(), answer_id, int(user_id)))
+            return cur.rowcount == 1
+
+    def feedback_summary(self) -> dict:
+        with self._connect() as con:
+            up, down, total = con.execute("SELECT coalesce(sum(rating='up'),0),coalesce(sum(rating='down'),0),count(*) FROM answer_feedback").fetchone()
+            reasons = dict(con.execute("SELECT reason,count(*) FROM answer_feedback WHERE rating='down' AND reason IS NOT NULL GROUP BY reason").fetchall())
+        return {"up": int(up), "down": int(down), "answers": int(total), "reasons": {k: int(v) for k, v in reasons.items()}}
+
+    def recent_negative_feedback(self, limit: int = 10) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute("SELECT answer_id,question,answer,reason,rated_at,cited_json,insufficient FROM answer_feedback WHERE rating='down' ORDER BY rated_at DESC LIMIT ?", (int(limit),)).fetchall()
+        return [{"answer_id": r[0], "question": r[1], "answer": r[2], "reason": r[3], "rated_at": r[4], "cited": json.loads(r[5]), "insufficient": bool(r[6])} for r in rows]
+
     def last_reindex_at(self) -> str | None: return self.get_setting("last_reindex_at")
     def set_last_reindex_at(self, value: str) -> None: self.set_setting("last_reindex_at", value)
     def provider_auth_failed(self) -> bool: return self.get_setting("provider_auth") == "failed"
@@ -172,7 +202,7 @@ class BotStateStore:
 
     def _prune_transient(self, con: sqlite3.Connection, now: float) -> None:
         cutoff = now - _STATE_RETENTION_SECONDS
-        con.execute("DELETE FROM update_claims WHERE status='done' AND updated_at<?", (cutoff,)); con.execute("DELETE FROM processed_updates WHERE created_at<?", (cutoff,)); con.execute("DELETE FROM rate_events WHERE created_at<?", (now - 60.0,)); con.execute("DELETE FROM source_sessions WHERE expires_at<=?", (now,)); con.execute("DELETE FROM owner_flows WHERE expires_at<=?", (now,)); con.execute("DELETE FROM conversation_turns WHERE updated_at<?", (now - 6 * 3600,))
+        con.execute("DELETE FROM update_claims WHERE status='done' AND updated_at<?", (cutoff,)); con.execute("DELETE FROM processed_updates WHERE created_at<?", (cutoff,)); con.execute("DELETE FROM rate_events WHERE created_at<?", (now - 60.0,)); con.execute("DELETE FROM source_sessions WHERE expires_at<=?", (now,)); con.execute("DELETE FROM owner_flows WHERE expires_at<=?", (now,)); con.execute("DELETE FROM conversation_turns WHERE updated_at<?", (now - 6 * 3600,)); con.execute("DELETE FROM answer_feedback WHERE rating IS NULL AND created_at<?", (now - _FEEDBACK_RETENTION_SECONDS,))
 
     def _ensure_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,6 +220,8 @@ class BotStateStore:
             CREATE TABLE IF NOT EXISTS question_usage(id INTEGER PRIMARY KEY,created_at REAL NOT NULL,user_id INTEGER NOT NULL,success INTEGER NOT NULL,latency_ms REAL NOT NULL,cache_hit INTEGER NOT NULL,ai_calls INTEGER NOT NULL,error_class TEXT);
             CREATE TABLE IF NOT EXISTS source_sessions(session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,payload_json TEXT NOT NULL,expires_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS conversation_turns(user_id INTEGER PRIMARY KEY,payload_json TEXT NOT NULL,updated_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS answer_feedback(answer_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,created_at REAL NOT NULL,question TEXT NOT NULL,answer TEXT NOT NULL,cited_json TEXT NOT NULL,insufficient INTEGER NOT NULL,rating TEXT CHECK(rating IN ('up','down')),reason TEXT,rated_at REAL);
+            CREATE INDEX IF NOT EXISTS idx_answer_feedback_rating ON answer_feedback(rating,rated_at);
             DROP TABLE IF EXISTS conversation_semantics;
             """)
 

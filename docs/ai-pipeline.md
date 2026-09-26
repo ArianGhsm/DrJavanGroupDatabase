@@ -42,6 +42,10 @@ Cards join retrieval as another ranked list (their keywords bridge paraphrases s
 
 Start it from the owner panel (📚 آرشیو و ایندکس → 🧠 مطالعهٔ آرشیو) or `drjavanbot study [--limit N] [--workers 6]`.
 
+## User feedback
+
+Every answer carries 👍/👎 (only the asker can rate). 👎 asks for a reason: wrong / was in the group but not found / incomplete / off-topic. The owner panel (🧰 ابزارها → 🗳 بازخورد کاربران) shows counts and the latest 👎 with question, answer and reason; `drjavanbot feedback` exports them as JSON for prompt/retrieval tuning. Unrated answers are kept 90 days.
+
 ## Evaluation
 
 `src/drjavanbot/evaluation/archive_questions.json` holds real questions from the archive re-worded as a user would ask them, each tied to the discussion that answers it (resolved at runtime by a verbatim anchor phrase), plus questions about things never discussed.
