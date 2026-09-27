@@ -150,6 +150,7 @@ class AdminControlCenter:
             "adm:cache": lambda: self.show_cache(chat_id, message_id),
             "adm:cache:clear": lambda: self._clear_cache(chat_id, message_id),
             "adm:stats": lambda: self.show_stats(chat_id, message_id),
+            "adm:feedback": lambda: self.show_feedback(chat_id, message_id),
         }
         route = routes.get(data)
         if route is not None:
@@ -399,11 +400,38 @@ class AdminControlCenter:
             [("⬅️ مرکز مدیریت", "adm:home")],
         ]))
 
+    def show_feedback(self, chat_id: int, message_id: int | None = None) -> None:
+        from .state import FEEDBACK_REASONS
+
+        try:
+            summary = self.state.feedback_summary()
+            recent = self.state.recent_negative_feedback(8)
+        except Exception:
+            summary, recent = {}, []
+        up, down, answers = int(summary.get("up", 0)), int(summary.get("down", 0)), int(summary.get("answers", 0))
+        lines = ["🗳 <b>بازخورد کاربران</b>", "", f"👍 {up}   👎 {down}   (از {answers} جواب)"]
+        reasons = summary.get("reasons") or {}
+        if reasons:
+            lines.append("دلیل 👎: " + "، ".join(f"{html_escape(FEEDBACK_REASONS.get(k, k))} {v}" for k, v in reasons.items()))
+        if recent:
+            lines += ["", "<b>آخرین 👎ها</b>"]
+            for item in recent:
+                question = html_escape(_clip_text(item.get("question"), 120))
+                answer = html_escape(_clip_text(item.get("answer"), 160))
+                reason = html_escape(FEEDBACK_REASONS.get(item.get("reason") or "", "بدون دلیل"))
+                lines.append(f"\n❓ {question}\n💬 {answer}\n↳ {reason}")
+        else:
+            lines += ["", "هنوز 👎ی ثبت نشده است."]
+        self._send_or_edit(chat_id, message_id, "\n".join(lines)[:3900], inline_keyboard([
+            [("🔄 تازه‌سازی", "adm:feedback")], [("⬅️ ابزارها", "adm:tools")],
+        ]))
+
     def show_tools(self, chat_id: int, message_id: int | None = None) -> None:
         self._send_or_edit(
             chat_id, message_id,
             "🧰 <b>ابزارها و عیب‌یابی</b>\n\nابزارهای کم‌استفاده اینجا قرار گرفته‌اند تا صفحه اصلی ساده بماند.",
             inline_keyboard([
+                [("🗳 بازخورد کاربران", "adm:feedback")],
                 [("📊 آمار", "adm:stats"), ("🧹 حافظه موقت", "adm:cache")],
                 [("🧯 خطاهای اخیر", "adm:errors")], [("⬅️ مرکز مدیریت", "adm:home")],
             ]),
@@ -938,3 +966,8 @@ def _study_text(study: dict) -> str:
     elif last.get("stopped") == "rate_limited":
         lines.append("⏳ به‌خاطر محدودیت درخواست متوقف شد؛ بعداً ادامه دهید.")
     return "\n".join(lines)
+
+
+def _clip_text(value, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"

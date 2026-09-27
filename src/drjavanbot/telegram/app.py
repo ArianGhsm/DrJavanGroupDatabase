@@ -133,12 +133,15 @@ class TelegramBotApp:
             chunks = answer_chunks(answer)
             for idx, chunk in enumerate(chunks):
                 markup = None
-                if idx == len(chunks)-1 and (answer.cited_message_ids or answer.source_refs):
-                    try: items = self.services.source_details(answer.cited_message_ids, answer.source_refs, getattr(answer, "external_sources", ()))
-                    except TypeError: items = self.services.source_details(answer.cited_message_ids, answer.source_refs)
-                    if items:
-                        sid = self.state.create_source_session(user_id, items, self.config.source_session_ttl_seconds)
-                        markup = inline_keyboard([[("🔎 منابع", f"src:{sid}:0")]])
+                if idx == len(chunks)-1:
+                    sid = ""
+                    if answer.cited_message_ids or answer.source_refs:
+                        try: items = self.services.source_details(answer.cited_message_ids, answer.source_refs, getattr(answer, "external_sources", ()))
+                        except TypeError: items = self.services.source_details(answer.cited_message_ids, answer.source_refs)
+                        if items:
+                            sid = self.state.create_source_session(user_id, items, self.config.source_session_ttl_seconds)
+                    answer_id = self._log_answer(user_id, question, answer)
+                    markup = _answer_keyboard(sid, answer_id, stage="ask")
                 self._send_answer_chunk(chat_id, chunk, reply_markup=markup)
         except AIConfigurationError: self._record_failure(user_id, started, "AIConfigurationError"); self.api.send_message(chat_id, "⚙️ سرویس AI هنوز توسط مدیر تنظیم نشده است.")
         except AuthenticationError: self.state.set_provider_auth_failed(True); self._record_failure(user_id, started, "AuthenticationError"); self.api.send_message(chat_id, "🔑 اتصال AvalAI نیازمند بررسی مدیر است.")
@@ -153,6 +156,41 @@ class TelegramBotApp:
             # error is already visible so the chat does not accumulate clutter.
             if reporter is not None:
                 reporter.close()
+
+    def _log_answer(self, user_id: int, question: str, answer) -> str | None:
+        log = getattr(self.state, "log_answer", None)
+        if not callable(log):
+            return None
+        text = "\n".join([answer.direct_answer, *answer.key_findings])
+        try:
+            return log(user_id, question, text, answer.cited_message_ids, insufficient=bool(answer.insufficient_evidence))
+        except Exception:
+            _LOG.warning("answer_feedback_log_failed")
+            return None
+
+    def _feedback_callback(self, cqid: str, chat_id: int, message_id: int, user_id: int, data: str) -> None:
+        # fb:<answer_id>:<sid>:up | fb:<answer_id>:<sid>:down | fb:<answer_id>:<sid>:r:<reason>
+        parts = data.split(":")
+        action = parts[3] if len(parts) >= 4 else ""
+        if action not in {"up", "down"} and not (action == "r" and len(parts) == 5):
+            try: self.api.answer_callback(cqid)
+            except TelegramAPIError: pass
+            return
+        answer_id, sid = parts[1], parts[2]
+        if action == "down":
+            ok = self.state.rate_answer(answer_id, user_id, "down")
+            toast, stage = ("چه مشکلی داشت؟ یکی را انتخاب کنید.", "reason") if ok else ("فقط پرسندهٔ سؤال می‌تواند امتیاز بدهد.", None)
+        elif action == "up":
+            ok = self.state.rate_answer(answer_id, user_id, "up")
+            toast, stage = ("ممنون 🙏", "done") if ok else ("فقط پرسندهٔ سؤال می‌تواند امتیاز بدهد.", None)
+        elif action == "r" and len(parts) == 5:
+            ok = self.state.rate_answer(answer_id, user_id, "down", parts[4])
+            toast, stage = ("ممنون؛ برای بهتر شدن ربات بررسی می‌شود.", "done") if ok else ("ثبت نشد.", None)
+        try: self.api.answer_callback(cqid, toast)
+        except TelegramAPIError: pass
+        if stage is not None:
+            try: self.api.edit_message_reply_markup(chat_id, message_id, reply_markup=_answer_keyboard(sid, answer_id, stage=stage))
+            except TelegramAPIError: pass
 
     def _answer(self, question: str, *, user_id: int, progress):
         progressive = getattr(self.services, "answer_with_progress", None)
@@ -183,6 +221,14 @@ class TelegramBotApp:
     def _handle_callback(self, cb: dict) -> None:
         if self.admin.handles_callback(str(cb.get("data") or "")):
             self.admin.handle_callback(cb); return
+        if str(cb.get("data") or "").startswith("fb:"):
+            try:
+                self._feedback_callback(str(cb.get("id") or ""), int((cb.get("message") or {}).get("chat", {}).get("id")),
+                                        int((cb.get("message") or {}).get("message_id")), int((cb.get("from") or {}).get("id")),
+                                        str(cb.get("data")))
+            except (TypeError, ValueError):
+                _LOG.warning("telegram_feedback_callback_invalid")
+            return
         cqid = str(cb.get("id") or ""); user = cb.get("from") or {}; msg = cb.get("message") or {}; chat = msg.get("chat") or {}
         try: user_id = int(user.get("id")); chat_id = int(chat.get("id")); message_id = int(msg.get("message_id"))
         except (TypeError, ValueError): _LOG.warning("telegram_callback_missing_identity"); return
@@ -286,3 +332,19 @@ class TelegramBotApp:
             except Exception as exc:
                 _LOG.exception("reindex_failed error_class=%s",type(exc).__name__); self.api.send_message(chat_id,"❌ Reindex ناموفق بود؛ index سالم قبلی حفظ شده است.")
         threading.Thread(target=work,name="drjavan-reindex",daemon=True).start()
+
+
+def _answer_keyboard(sid: str, answer_id: str | None, *, stage: str) -> dict | None:
+    """Sources button plus the rating row: ask → 👍/👎, reason → why 👎, done → none."""
+    rows: list[list[tuple[str, str]]] = []
+    if sid:
+        rows.append([("🔎 منابع", f"src:{sid}:0")])
+    if answer_id:
+        base = f"fb:{answer_id}:{sid}"
+        if stage == "ask":
+            rows.append([("👍", f"{base}:up"), ("👎", f"{base}:down")])
+        elif stage == "reason":
+            labels = {"wrong": "❌ اشتباه", "missed": "🔍 پیدا نکرد", "incomplete": "✂️ ناقص", "offtopic": "↪️ نامرتبط"}
+            rows.append([(labels[key], f"{base}:r:{key}") for key in ("wrong", "missed")])
+            rows.append([(labels[key], f"{base}:r:{key}") for key in ("incomplete", "offtopic")])
+    return inline_keyboard(rows) if rows else None

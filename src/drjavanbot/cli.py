@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     study.add_argument("--workers", type=int, default=6)
     study.add_argument("--secret-dir", type=Path, default=None)
 
+    feedback = sub.add_parser("feedback", help="Export users' 👎 answers (question, answer, reason) as JSON")
+    feedback.add_argument("--limit", type=int, default=200)
+
     ask = sub.add_parser("ask", help="Answer one question end-to-end with the configured AvalAI key")
     ask.add_argument("question")
     ask.add_argument("--secret-dir", type=Path, default=None)
@@ -101,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
                             secret_dir=args.secret_dir or settings.data_dir.parent / "secrets")
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if not report.get("stopped_reason") else 1
+    if args.command == "feedback":
+        from drjavanbot.telegram.state import BotStateStore
+        state = BotStateStore(settings.data_dir / "bot_state.sqlite3")
+        print(json.dumps({"summary": state.feedback_summary(), "negative": state.recent_negative_feedback(args.limit)},
+                         ensure_ascii=False, indent=2))
+        return 0
     if args.command == "ask":
         from drjavanbot.evaluation.runner import ask_once
         answer = ask_once(db_path, args.question, secret_dir=args.secret_dir or settings.data_dir.parent / "secrets")
